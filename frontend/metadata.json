@@ -1,0 +1,6 @@
+{
+  "name": "DevPulse",
+  "description": "Interactive developer telemetry and workspace resource monitoring system featuring real-time process treemaps, tab classification, and session timeline analysis.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

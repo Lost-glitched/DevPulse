@@ -1,0 +1,101 @@
+# DevPulse Diagnostic Rules
+# Each rule defines conditions, a cause label, confidence score, and recommendation.
+# The engine evaluates these against recent events from the store.
+
+rules:
+  - id: memory_pressure
+    name: System Memory Pressure
+    description: Total system RAM utilization exceeds safe threshold
+    conditions:
+      metric: system_ram_percent
+      operator: ">"
+      threshold: 80.0
+      window_seconds: 30
+    cause_label: Memory Pressure
+    cause_badge: "HIGH MEMORY"
+    confidence: 0.9
+    recommendation: "Close unused applications or restart memory-heavy processes"
+
+  - id: language_server_thrashing
+    name: Language Server Thrashing
+    description: LSP process is consuming excessive CPU for extended period
+    conditions:
+      process_pattern:
+        - rust-analyzer
+        - rust_analyzer
+        - tsserver
+        - typescript-language-server
+        - gopls
+        - pylsp
+        - pyright
+      metric: cpu_percent
+      operator: ">"
+      threshold: 50.0
+      sustained_samples: 5
+    cause_label: LSP Thrashing
+    cause_badge: "CAUSE"
+    confidence: 0.85
+    recommendation: "Language server is re-indexing excessively. Consider restarting the LSP or reducing workspace scope."
+
+  - id: redundant_file_watchers
+    name: Redundant File Watchers
+    description: Multiple file-watching processes competing for the same directory tree
+    conditions:
+      process_pattern:
+        - watchdog
+        - chokidar
+        - fsevents
+        - inotifywait
+        - webpack
+        - vite
+        - esbuild
+        - nodemon
+      min_concurrent: 3
+      metric: cpu_percent
+      operator: ">"
+      threshold: 5.0
+    cause_label: Redundant Watchers
+    cause_badge: "CAUSE"
+    confidence: 0.75
+    recommendation: "Multiple file watchers detected. Consider consolidating or disabling redundant watchers."
+
+  - id: forgotten_background_process
+    name: Forgotten Background Process
+    description: Process consuming significant RAM but idle for extended period
+    conditions:
+      metric: ram_gb
+      operator: ">"
+      threshold: 0.2
+      idle_minutes: 30
+      cpu_below: 0.5
+    cause_label: Forgotten Process
+    cause_badge: "IDLE"
+    confidence: 0.7
+    recommendation: "This process appears idle but is consuming memory. Consider terminating it."
+
+  - id: docker_overhead
+    name: Docker Overhead
+    description: Docker ecosystem consuming excessive total RAM
+    conditions:
+      category: containers
+      aggregate: sum
+      metric: ram_gb
+      operator: ">"
+      threshold: 3.0
+    cause_label: Docker Overhead
+    cause_badge: "CAUSE"
+    confidence: 0.8
+    recommendation: "Docker containers are using significant RAM. Consider setting memory limits or stopping unused containers."
+
+  - id: memory_leak
+    name: Memory Leak Detection
+    description: Process RAM growing steadily over time
+    conditions:
+      metric: ram_growth_mb_per_min
+      operator: ">"
+      threshold: 10.0
+      window_minutes: 5
+    cause_label: Memory Leak
+    cause_badge: "CAUSE"
+    confidence: 0.85
+    recommendation: "Restart worker or enable memory limit"
