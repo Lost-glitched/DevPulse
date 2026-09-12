@@ -28,19 +28,38 @@ async def get_db() -> aiosqlite.Connection:
 async def init_db() -> None:
     """Run schema.sql to create tables and indices if they don't exist, and migrate columns."""
     schema_sql = Path(SCHEMA_PATH).read_text(encoding="utf-8")
-    db = await get_db()
     try:
-        # Check if events table exists; if so, ensure project_id column exists before running schema indices
-        cursor = await db.execute("PRAGMA table_info(events)")
-        columns = [row[1] for row in await cursor.fetchall()]
-        if columns and "project_id" not in columns:
-            await db.execute("ALTER TABLE events ADD COLUMN project_id TEXT")
-            await db.commit()
+        db = await get_db()
+        try:
+            # Check if events table exists; if so, ensure project_id column exists before running schema indices
+            cursor = await db.execute("PRAGMA table_info(events)")
+            columns = [row[1] for row in await cursor.fetchall()]
+            if columns and "project_id" not in columns:
+                await db.execute("ALTER TABLE events ADD COLUMN project_id TEXT")
+                await db.commit()
 
-        await db.executescript(schema_sql)
-        await db.commit()
-    finally:
-        await db.close()
+            await db.executescript(schema_sql)
+            await db.commit()
+        finally:
+            await db.close()
+    except Exception as e:
+        if "malformed" in str(e).lower() or "corrupt" in str(e).lower():
+            # Automatically recreate database if disk image is malformed
+            for ext in ["", "-shm", "-wal"]:
+                p = Path(f"{DB_PATH}{ext}")
+                if p.exists():
+                    try:
+                        p.unlink()
+                    except Exception:
+                        pass
+            db = await get_db()
+            try:
+                await db.executescript(schema_sql)
+                await db.commit()
+            finally:
+                await db.close()
+        else:
+            raise
 
 
 def make_event(
