@@ -28,12 +28,31 @@ async def get_db() -> aiosqlite.Connection:
 async def init_db() -> None:
     """Run schema.sql to create tables and indices if they don't exist."""
     schema_sql = Path(SCHEMA_PATH).read_text(encoding="utf-8")
-    db = await get_db()
     try:
-        await db.executescript(schema_sql)
-        await db.commit()
-    finally:
-        await db.close()
+        db = await get_db()
+        try:
+            await db.executescript(schema_sql)
+            await db.commit()
+        finally:
+            await db.close()
+    except Exception as e:
+        if "malformed" in str(e).lower() or "corrupt" in str(e).lower():
+            # Automatically recreate database if disk image is malformed
+            for ext in ["", "-shm", "-wal"]:
+                p = Path(f"{DB_PATH}{ext}")
+                if p.exists():
+                    try:
+                        p.unlink()
+                    except Exception:
+                        pass
+            db = await get_db()
+            try:
+                await db.executescript(schema_sql)
+                await db.commit()
+            finally:
+                await db.close()
+        else:
+            raise
 
 
 def make_event(

@@ -9,6 +9,7 @@ interface TopNavBarProps {
   onToggleObserver: () => void;
   onOpenSnapshotDump: () => void;
   systemMemoryUsedGb: number;
+  systemMemoryTotalGb: number;
 }
 
 export const TopNavBar: React.FC<TopNavBarProps> = ({
@@ -19,6 +20,7 @@ export const TopNavBar: React.FC<TopNavBarProps> = ({
   onToggleObserver,
   onOpenSnapshotDump,
   systemMemoryUsedGb,
+  systemMemoryTotalGb,
 }) => {
   const [seconds, setSeconds] = useState(6138); // 01h 42m 18s
 
@@ -73,7 +75,7 @@ export const TopNavBar: React.FC<TopNavBarProps> = ({
               memory
             </span>
             <span>
-              Memory: <strong className="text-slate-200 font-semibold">{systemMemoryUsedGb.toFixed(2)} GB</strong> / 16 GB
+              Memory: <strong className="text-slate-200 font-semibold">{(systemMemoryUsedGb ?? 0).toFixed(2)} GB</strong> / {(systemMemoryTotalGb ?? 16).toFixed(1)} GB
             </span>
           </span>
         </div>

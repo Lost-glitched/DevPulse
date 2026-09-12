@@ -6,6 +6,10 @@ interface SideNavProps {
   onViewChange: (view: ViewMode) => void;
   themeStyle: ThemeStyle;
   activeTabsCount: number;
+  ideCount: number;
+  terminalCount: number;
+  containerCount: number;
+  browserCount: number;
 }
 
 export const SideNav: React.FC<SideNavProps> = ({
@@ -13,6 +17,10 @@ export const SideNav: React.FC<SideNavProps> = ({
   onViewChange,
   themeStyle,
   activeTabsCount,
+  ideCount,
+  terminalCount,
+  containerCount,
+  browserCount,
 }) => {
   const [isRecording, setIsRecording] = useState(false);
   const [recSeconds, setRecSeconds] = useState(0);
@@ -190,7 +198,7 @@ export const SideNav: React.FC<SideNavProps> = ({
                 <span className="flex items-center gap-1.5 text-slate-300 text-[11px]">
                   <span className="w-1.5 h-1.5 rounded-full bg-[#38bdf8]" /> IDE Processes
                 </span>
-                <span className="text-slate-500 text-[11px]">4 Active</span>
+                <span className="text-slate-500 text-[11px]">{ideCount} Active</span>
               </div>
               <div
                 onClick={() => onViewChange('treemap')}
@@ -199,7 +207,7 @@ export const SideNav: React.FC<SideNavProps> = ({
                 <span className="flex items-center gap-1.5 text-slate-300 text-[11px]">
                   <span className="w-1.5 h-1.5 rounded-full bg-[#fb923c]" /> Terminals / CLI
                 </span>
-                <span className="text-slate-500 text-[11px]">2 Active</span>
+                <span className="text-slate-500 text-[11px]">{terminalCount} Active</span>
               </div>
               <div
                 onClick={() => onViewChange('treemap')}
@@ -208,7 +216,7 @@ export const SideNav: React.FC<SideNavProps> = ({
                 <span className="flex items-center gap-1.5 text-slate-300 text-[11px]">
                   <span className="w-1.5 h-1.5 rounded-full bg-[#4ade80]" /> Docker &amp; Git
                 </span>
-                <span className="text-slate-500 text-[11px]">Up (6)</span>
+                <span className="text-slate-500 text-[11px]">{containerCount > 0 ? `Up (${containerCount})` : 'None'}</span>
               </div>
               <div
                 onClick={() => onViewChange('tabs')}
@@ -217,7 +225,7 @@ export const SideNav: React.FC<SideNavProps> = ({
                 <span className="flex items-center gap-1.5 text-slate-300 text-[11px]">
                   <span className="w-1.5 h-1.5 rounded-full bg-[#c084fc]" /> Browser Instances
                 </span>
-                <span className="text-slate-500 text-[11px]">42 Tabs</span>
+                <span className="text-slate-500 text-[11px]">{browserCount} Procs</span>
               </div>
             </div>
           </div>

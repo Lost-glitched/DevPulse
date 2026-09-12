@@ -1,11 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { TabItem, DuplicateGroup, ThemeStyle } from '../types';
 import { fetchTabs, suspendTab, bulkSuspendTabs } from '../services/api';
-import {
-  INITIAL_ACTIVE_TABS,
-  INITIAL_DUPLICATE_GROUPS,
-  INITIAL_STALE_TABS,
-} from '../data/telemetryData';
 
 interface TabClassifierViewProps {
   themeStyle: ThemeStyle;
@@ -18,12 +13,12 @@ export const TabClassifierView: React.FC<TabClassifierViewProps> = ({
   onOpenAutoFreeze,
   onReclaimMemory,
 }) => {
-  const [activeTabs, setActiveTabs] = useState<TabItem[]>(INITIAL_ACTIVE_TABS);
-  const [duplicateGroups, setDuplicateGroups] = useState<DuplicateGroup[]>(INITIAL_DUPLICATE_GROUPS);
-  const [staleTabs, setStaleTabs] = useState<TabItem[]>(INITIAL_STALE_TABS);
+  const [activeTabs, setActiveTabs] = useState<TabItem[]>([]);
+  const [duplicateGroups, setDuplicateGroups] = useState<DuplicateGroup[]>([]);
+  const [staleTabs, setStaleTabs] = useState<TabItem[]>([]);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedInfoTab, setSelectedInfoTab] = useState<TabItem | null>(null);
-  const [recoveredSessionGb, setRecoveredSessionGb] = useState<number>(6.1);
+  const [recoveredSessionGb, setRecoveredSessionGb] = useState<number>(0);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   // Polling data
@@ -32,15 +27,16 @@ export const TabClassifierView: React.FC<TabClassifierViewProps> = ({
     const poll = async () => {
       const res = await fetchTabs();
       if (res) {
-        if (res.activeTabs.length > 0) setActiveTabs(res.activeTabs);
-        if (res.duplicateGroups.length > 0) setDuplicateGroups(res.duplicateGroups);
-        if (res.staleTabs.length > 0) setStaleTabs(res.staleTabs);
+        setActiveTabs(res.activeTabs ?? []);
+        setDuplicateGroups(res.duplicateGroups ?? []);
+        setStaleTabs(res.staleTabs ?? []);
       }
       timer = window.setTimeout(poll, 10000);
     };
     poll();
     return () => clearTimeout(timer);
   }, []);
+
 
   const isPrecision = themeStyle === 'precision';
 

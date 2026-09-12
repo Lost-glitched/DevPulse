@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { ViewMode, ThemeStyle, ProcessNode } from './types';
-import { fetchResources, checkBackendHealth } from './services/api';
+import { fetchResources, checkBackendHealth, fetchTabs } from './services/api';
 import { TopNavBar } from './components/TopNavBar';
 import { SideNav } from './components/SideNav';
 import { ResourceTreemapView } from './components/ResourceTreemapView';
@@ -16,8 +16,11 @@ export default function App() {
   const [isObserverPaused, setIsObserverPaused] = useState<boolean>(false);
   
   const [processes, setProcesses] = useState<ProcessNode[]>([]);
-  const [selectedProcessId, setSelectedProcessId] = useState<string>('proc-webpack');
+  const [selectedProcessId, setSelectedProcessId] = useState<string>('');
   const [systemMemoryUsedGb, setSystemMemoryUsedGb] = useState<number>(0);
+  const [systemMemoryTotalGb, setSystemMemoryTotalGb] = useState<number>(16.0);
+  const [activeTabsCount, setActiveTabsCount] = useState<number>(0);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isBackendConnected, setIsBackendConnected] = useState(true);
 
   // Modals
@@ -49,10 +52,28 @@ export default function App() {
     
     const poll = async () => {
       if (!isObserverPaused) {
-        const res = await fetchResources();
-        if (res) {
+        const [res, tabsRes] = await Promise.all([
+          fetchResources(),
+          fetchTabs(),
+        ]);
+
+        if (res && res.processes) {
           setProcesses(res.processes);
-          setSystemMemoryUsedGb(res.systemMemoryUsedGb);
+          if (res.systemMemoryUsedGb != null) {
+            setSystemMemoryUsedGb(res.systemMemoryUsedGb);
+          }
+          if (res.systemMemoryTotalGb != null) {
+            setSystemMemoryTotalGb(res.systemMemoryTotalGb);
+          }
+          setSelectedProcessId((prev) => {
+            if (prev && res.processes.some((p: ProcessNode) => p.id === prev)) return prev;
+            return res.processes[0]?.id || '';
+          });
+          setIsLoading(false);
+        }
+
+        if (tabsRes) {
+          setActiveTabsCount(tabsRes.tabCount ?? tabsRes.activeTabs?.length ?? 0);
         }
       }
       timer = window.setTimeout(poll, 2000);
@@ -136,7 +157,11 @@ export default function App() {
         currentView={currentView}
         onViewChange={setCurrentView}
         themeStyle={themeStyle}
-        activeTabsCount={48}
+        activeTabsCount={activeTabsCount}
+        ideCount={processes.filter((p) => p.subsystem === 'ide').length}
+        terminalCount={processes.filter((p) => p.subsystem === 'terminal').length}
+        containerCount={processes.filter((p) => p.subsystem === 'containers').length}
+        browserCount={processes.filter((p) => p.subsystem === 'browser').length}
       />
 
       {/* Main App Workspace */}
@@ -150,36 +175,48 @@ export default function App() {
           onToggleObserver={() => setIsObserverPaused(!isObserverPaused)}
           onOpenSnapshotDump={() => setIsSnapshotOpen(true)}
           systemMemoryUsedGb={systemMemoryUsedGb}
+          systemMemoryTotalGb={systemMemoryTotalGb}
         />
 
         {/* Dynamic View Display */}
         <div className="flex-1 flex min-h-0 overflow-hidden relative">
-          {currentView === 'treemap' && (
-            <ResourceTreemapView
-              processes={processes}
-              selectedProcessId={selectedProcessId}
-              onSelectProcess={setSelectedProcessId}
-              onIsolateProcess={handleIsolateProcess}
-              onRestartProcess={handleRestartProcess}
-              onKillProcess={handleKillProcess}
-              themeStyle={themeStyle}
-            />
-          )}
+          {isLoading && processes.length === 0 ? (
+            <div className="flex-1 flex flex-col items-center justify-center gap-3 font-mono text-xs text-slate-400">
+              <span className="material-symbols-outlined text-sky-400 animate-spin" style={{ fontSize: 28 }}>
+                progress_activity
+              </span>
+              <span>Connecting to DevPulse Telemetry Agent...</span>
+            </div>
+          ) : (
+            <>
+              {currentView === 'treemap' && (
+                <ResourceTreemapView
+                  processes={processes}
+                  selectedProcessId={selectedProcessId}
+                  onSelectProcess={setSelectedProcessId}
+                  onIsolateProcess={handleIsolateProcess}
+                  onRestartProcess={handleRestartProcess}
+                  onKillProcess={handleKillProcess}
+                  themeStyle={themeStyle}
+                />
+              )}
 
-          {currentView === 'tabs' && (
-            <TabClassifierView
-              themeStyle={themeStyle}
-              onOpenAutoFreeze={() => setIsAutoFreezeOpen(true)}
-              onReclaimMemory={handleReclaimMemory}
-            />
-          )}
+              {currentView === 'tabs' && (
+                <TabClassifierView
+                  themeStyle={themeStyle}
+                  onOpenAutoFreeze={() => setIsAutoFreezeOpen(true)}
+                  onReclaimMemory={handleReclaimMemory}
+                />
+              )}
 
-          {currentView === 'timeline' && (
-            <SessionTimelineView
-              themeStyle={themeStyle}
-              onNavigateToTreemap={handleNavigateToTreemap}
-              onOpenBaselineCompare={() => setIsBaselineOpen(true)}
-            />
+              {currentView === 'timeline' && (
+                <SessionTimelineView
+                  themeStyle={themeStyle}
+                  onNavigateToTreemap={handleNavigateToTreemap}
+                  onOpenBaselineCompare={() => setIsBaselineOpen(true)}
+                />
+              )}
+            </>
           )}
         </div>
       </div>
@@ -191,6 +228,7 @@ export default function App() {
         processes={processes}
         themeStyle={themeStyle}
         systemMemoryUsedGb={systemMemoryUsedGb}
+        systemMemoryTotalGb={systemMemoryTotalGb}
       />
 
       <AutoFreezeModal

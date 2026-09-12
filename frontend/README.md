@@ -1,20 +1,39 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
+# DevPulse Frontend
 
-# Run and deploy your AI Studio app
+Modern, high-performance web dashboard for real-time developer system telemetry, resource visualization, and diagnostic tracking.
 
-This contains everything you need to run your app locally.
+## Technology Stack
 
-View your app in AI Studio: https://ai.studio/apps/dcc16943-10dc-4150-8146-9eb8955f5075
+- **Framework**: React 19 + TypeScript
+- **Bundler**: Vite 6
+- **Icons**: Lucide React
+- **Styling**: Tailwind CSS & Modern Glassmorphic CSS Design System
 
-## Run Locally
+## Getting Started
 
-**Prerequisites:**  Node.js
+### Prerequisites
+- Node.js (v18+)
+- npm or yarn
 
+### Installation
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+```bash
+cd frontend
+npm install
+```
+
+### Running Locally
+
+```bash
+npm run dev
+```
+
+The frontend server starts at `http://localhost:3000` and communicates with the DevPulse backend API running on `http://127.0.0.1:8000`.
+
+### Production Build
+
+```bash
+npm run build
+npm run preview
+```
+

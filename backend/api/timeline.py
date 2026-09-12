@@ -33,7 +33,7 @@ def _event_to_marker(event: dict, range_start: datetime, range_minutes: float) -
         ts_str = event["timestamp"]
         ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
         minutes_from_start = (ts - range_start).total_seconds() / 60.0
-        percent_left = max(0, min(100, (minutes_from_start / range_minutes) * 100))
+        percent_left = max(2.0, min(95.0, (minutes_from_start / range_minutes) * 100))
 
         category = event.get("category", "system")
         payload = event.get("payload", {})
@@ -100,11 +100,11 @@ def _format_ram(gb: float) -> str:
 
 @router.get("")
 async def get_timeline(
-    range: str = Query("4h", regex="^(1h|4h|8h|full)$"),
+    range: str = Query("4h", pattern="^(1h|4h|8h|full)$"),
 ):
     """
     Return merged timeline events across all sources.
-    Non-resource_sample events plus spikes.
+    Deduplicates high-frequency samples into distinct spikes.
     """
     range_hours = {"1h": 1, "4h": 4, "8h": 8, "full": 24}[range]
     now = datetime.now(timezone.utc)
@@ -113,22 +113,35 @@ async def get_timeline(
 
     cutoff = range_start.isoformat(timespec="milliseconds")
 
-    # Get non-resource events (git, file_saved, etc.) — these are the interesting ones
-    non_resource_events = await query_events(
+    all_events = await query_events(
         start=cutoff,
-        limit=200,
+        limit=1000,
     )
 
-    # Filter: for timeline markers, skip resource_sample unless it's a spike
     markers: list[dict] = []
-    resource_sample_count = 0
-    for e in non_resource_events:
-        if e["event_type"] == "resource_sample":
-            resource_sample_count += 1
-            # Only include high-CPU spikes
-            cpu = e["payload"].get("cpu_percent", 0)
-            if cpu < 50:
+    seen_spike_buckets: set[str] = set()
+
+    for e in all_events:
+        event_type = e.get("event_type", "")
+        payload = e.get("payload", {})
+        ts_str = e.get("timestamp", "")
+
+        if event_type == "resource_sample":
+            cpu = payload.get("cpu_percent", 0)
+            ram = payload.get("ram_gb", 0)
+            if cpu < 50 and ram < 2.0:
                 continue
+            name = payload.get("name", "proc")
+            bucket = f"{name}:{ts_str[:16]}"
+            if bucket in seen_spike_buckets:
+                continue
+            seen_spike_buckets.add(bucket)
+
+        elif event_type == "file_saved":
+            bucket = f"filesave:{ts_str[:16]}"
+            if bucket in seen_spike_buckets:
+                continue
+            seen_spike_buckets.add(bucket)
 
         marker = _event_to_marker(e, range_start, range_minutes)
         if marker:
@@ -137,18 +150,20 @@ async def get_timeline(
     # Sort by time
     markers.sort(key=lambda m: m["timestampMinutes"])
 
-    # Limit to avoid overwhelming the frontend
-    if len(markers) > 50:
-        # Keep git/file events + top spikes
-        important = [m for m in markers if not m.get("isSpike")]
-        spikes = [m for m in markers if m.get("isSpike")]
-        spikes.sort(key=lambda m: -m["timestampMinutes"])
-        markers = important[:30] + spikes[:20]
-        markers.sort(key=lambda m: m["timestampMinutes"])
+    # Limit per track to avoid overwhelming the frontend UI
+    by_track: dict[str, list[dict]] = {}
+    for m in markers:
+        by_track.setdefault(m["track"], []).append(m)
+
+    clean_markers: list[dict] = []
+    for track, t_markers in by_track.items():
+        clean_markers.extend(t_markers[-8:])
+
+    clean_markers.sort(key=lambda m: m["timestampMinutes"])
 
     return {
         "range": range,
-        "markers": markers,
+        "markers": clean_markers,
         "rangeStartIso": range_start.isoformat(),
         "rangeEndIso": now.isoformat(),
     }
@@ -162,13 +177,11 @@ async def get_telemetry_at_time(
     Return detailed subsystem breakdown at a specific point in time.
     This powers the scrubber detail panel in the timeline view.
     """
-    # Parse the time parameter
     now = datetime.now(timezone.utc)
     try:
         if "T" in time:
             target = datetime.fromisoformat(time.replace("Z", "+00:00"))
         else:
-            # Parse HH:MM:SS — assume today
             parts = time.split(":")
             h, m = int(parts[0]), int(parts[1])
             s = int(parts[2]) if len(parts) > 2 else 0
@@ -180,6 +193,14 @@ async def get_telemetry_at_time(
     window_start = (target - timedelta(minutes=2)).isoformat(timespec="milliseconds")
     window_end = (target + timedelta(minutes=2)).isoformat(timespec="milliseconds")
     events = await query_events(start=window_start, end=window_end, limit=500)
+
+    # Fallback to nearest recorded resource samples if window is empty
+    if not any(e.get("event_type") == "resource_sample" for e in events):
+        fallback_events = await query_events(end=window_end, event_type="resource_sample", limit=200)
+        if not fallback_events:
+            fallback_events = await query_events(event_type="resource_sample", limit=200)
+        if fallback_events:
+            events.extend(fallback_events)
 
     # Aggregate by subsystem
     subsystem_data: dict[str, dict[str, Any]] = {

@@ -7,6 +7,7 @@ interface SnapshotDumpModalProps {
   processes: ProcessNode[];
   themeStyle: ThemeStyle;
   systemMemoryUsedGb: number;
+  systemMemoryTotalGb?: number;
 }
 
 export const SnapshotDumpModal: React.FC<SnapshotDumpModalProps> = ({
@@ -15,6 +16,7 @@ export const SnapshotDumpModal: React.FC<SnapshotDumpModalProps> = ({
   processes,
   themeStyle,
   systemMemoryUsedGb,
+  systemMemoryTotalGb = 16.0,
 }) => {
   const [copied, setCopied] = useState(false);
 
@@ -28,9 +30,9 @@ export const SnapshotDumpModal: React.FC<SnapshotDumpModalProps> = ({
     timestamp: new Date().toISOString(),
     session_id: 'sess-89104-prod-core',
     host_metrics: {
-      total_ram_gb: 16.0,
+      total_ram_gb: systemMemoryTotalGb,
       allocated_ram_gb: parseFloat(systemMemoryUsedGb.toFixed(2)),
-      utilization_percentage: parseFloat(((systemMemoryUsedGb / 16) * 100).toFixed(1)),
+      utilization_percentage: parseFloat(((systemMemoryUsedGb / (systemMemoryTotalGb || 16)) * 100).toFixed(1)),
       cpu_cores_active: 8,
       kernel_version: '6.5.0-35-generic',
       active_subsystems: ['ide', 'terminal', 'containers', 'browser'],

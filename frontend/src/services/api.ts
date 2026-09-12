@@ -10,7 +10,7 @@ const API_BASE = '/api';
 // Track whether the backend is reachable
 let _backendAvailable = true;
 let _lastCheck = 0;
-const CHECK_INTERVAL_MS = 10_000;
+const CHECK_INTERVAL_MS = 2_000;
 
 async function apiFetch<T>(path: string, fallback: T): Promise<T> {
   // If backend was recently unreachable, skip fetch for a bit to avoid noise
@@ -35,7 +35,7 @@ async function apiFetch<T>(path: string, fallback: T): Promise<T> {
   } catch (error) {
     _backendAvailable = false;
     _lastCheck = now;
-    console.debug(`[DevPulse API] ${path} unavailable, using mock data`);
+    console.debug(`[DevPulse API] ${path} unavailable:`, error);
     return fallback;
   }
 }
@@ -126,7 +126,7 @@ export async function fetchTimeline(
 export async function fetchTelemetryAtTime(
   time: string
 ): Promise<any | null> {
-  return apiFetch<any | null>(`/timeline/telemetry?time=${time}`, null);
+  return apiFetch<any | null>(`/timeline/telemetry?time=${encodeURIComponent(time)}`, null);
 }
 
 // ─── Health Check ────────────────────────────────────────────

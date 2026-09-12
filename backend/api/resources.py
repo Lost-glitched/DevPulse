@@ -148,7 +148,7 @@ async def get_current_resources():
 
 @router.get("/history")
 async def get_resource_history(
-    range: str = Query("1h", regex="^(1h|4h|8h)$"),
+    range: str = Query("1h", pattern="^(1h|4h|8h)$"),
 ):
     """
     Return time-bucketed resource usage series for the waveform graph.
