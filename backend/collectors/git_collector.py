@@ -13,12 +13,15 @@ from typing import Any
 
 from backend.config import GIT_POLL_INTERVAL
 from backend.db.store import make_event, write_events_batch
+from backend.project_context import detect_project_id
 
 logger = logging.getLogger("devpulse.collectors.git")
 
-# Track the last seen commit hash to detect new commits
+# Track the last seen commit hash and branch to detect changes
 _last_seen_hash: str | None = None
+_last_seen_branch: str | None = None
 _repo = None
+_project_id: str | None = None
 
 
 def _get_repo(search_path: str | None = None):
@@ -60,11 +63,16 @@ def _ingest_recent_history(repo, max_commits: int = 50) -> list[dict[str, Any]]:
             "insertions": commit.stats.total.get("insertions", 0) if commit.stats else 0,
             "deletions": commit.stats.total.get("deletions", 0) if commit.stats else 0,
         }
+        global _project_id
+        if _project_id is None:
+            _project_id = detect_project_id()
+
         event = make_event(
             source="git",
             category="git",
             event_type="git_commit",
             payload=payload,
+            project_id=_project_id,
         )
         # Override timestamp to match commit time
         event["timestamp"] = commit.authored_datetime.isoformat(timespec="milliseconds")
@@ -75,7 +83,9 @@ def _ingest_recent_history(repo, max_commits: int = 50) -> list[dict[str, Any]]:
 
 def _check_new_commits(repo) -> list[dict[str, Any]]:
     """Check for commits newer than _last_seen_hash."""
-    global _last_seen_hash
+    global _last_seen_hash, _last_seen_branch, _project_id
+    if _project_id is None:
+        _project_id = detect_project_id()
     events: list[dict[str, Any]] = []
 
     try:
@@ -85,9 +95,33 @@ def _check_new_commits(repo) -> list[dict[str, Any]]:
 
     if _last_seen_hash is None:
         _last_seen_hash = head_commit.hexsha
+        try:
+            _last_seen_branch = repo.active_branch.name
+        except Exception:
+            pass
         return events
 
     if head_commit.hexsha == _last_seen_hash:
+        # Check if branch changed even if head commit is same
+        try:
+            active_branch = repo.active_branch.name
+            if _last_seen_branch is not None and active_branch != _last_seen_branch:
+                _last_seen_branch = active_branch
+                event = make_event(
+                    source="git",
+                    category="git",
+                    event_type="git_checkout",
+                    payload={"branch": active_branch, "head": head_commit.hexsha[:12]},
+                    project_id=_project_id,
+                )
+                events.append(event)
+                try:
+                    from backend.shadow_repo.repo import snapshot
+                    asyncio.create_task(snapshot(project_root=_project_id, trigger="post_checkout"))
+                except Exception:
+                    pass
+        except Exception:
+            pass
         return events
 
     # Collect new commits
@@ -114,10 +148,19 @@ def _check_new_commits(repo) -> list[dict[str, Any]]:
                 category="git",
                 event_type="git_commit",
                 payload=payload,
+                project_id=_project_id,
             )
             events.append(event)
 
         _last_seen_hash = head_commit.hexsha
+
+        # Trigger post_commit shadow snapshot
+        if new_commits:
+            try:
+                from backend.shadow_repo.repo import snapshot
+                asyncio.create_task(snapshot(project_root=_project_id, trigger="post_commit"))
+            except Exception:
+                pass
 
     except Exception as exc:
         logger.debug("Error checking new commits: %s", exc)
@@ -125,18 +168,28 @@ def _check_new_commits(repo) -> list[dict[str, Any]]:
     # Also check for branch change
     try:
         active_branch = repo.active_branch.name
+        branch_changed = (_last_seen_branch is not None and active_branch != _last_seen_branch)
+        _last_seen_branch = active_branch
+
         payload = {
             "branch": active_branch,
             "head": head_commit.hexsha[:12],
         }
-        # We'll always record branch info — the timeline can use it
         event = make_event(
             source="git",
             category="git",
             event_type="git_checkout",
             payload=payload,
+            project_id=_project_id,
         )
         events.append(event)
+
+        if branch_changed:
+            try:
+                from backend.shadow_repo.repo import snapshot
+                asyncio.create_task(snapshot(project_root=_project_id, trigger="post_checkout"))
+            except Exception:
+                pass
     except Exception:
         pass  # detached HEAD, etc.
 

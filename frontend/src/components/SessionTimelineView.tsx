@@ -1,27 +1,52 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { TimelineMarker, ThemeStyle, ScrubPointTelemetry } from '../types';
-import { fetchTimeline, fetchTelemetryAtTime } from '../services/api';
-import { TIMELINE_MARKERS, SCRUB_TELEMETRY_DATA } from '../data/telemetryData';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { TimelineMarker, ExecutionMarker, ThemeStyle, ScrubPointTelemetry, FailureDiffResponse } from '../types';
+import { fetchTimeline, fetchTelemetryAtTime, fetchFailureDiff, fetchResourceHistory } from '../services/api';
 
 interface SessionTimelineViewProps {
   themeStyle: ThemeStyle;
   onNavigateToTreemap: (processId?: string) => void;
-  onOpenBaselineCompare: () => void;
+  onOpenBaselineCompare: (diff?: FailureDiffResponse) => void;
+  systemMemoryTotalGb?: number;
 }
+
+const INITIAL_LIVE_TELEMETRY: ScrubPointTelemetry = {
+  timeStr: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+  isoTime: new Date().toISOString(),
+  traceId: '#TRC-live-session',
+  anomalyTitle: 'Active Telemetry Monitoring',
+  anomalyBadge: 'Nominal · Live Telemetry',
+  ramUsageGb: 0,
+  cpuPercent: 0,
+  narrativeHeadline: 'Monitoring live system telemetry and active processes...',
+  narrativeBody: 'System memory and CPU within nominal operational envelope.',
+  swapThrashingText: 'Swap idle. No page thrashing.',
+  subsystems: {
+    ide: { name: 'IDE / Editor', rss: '0 MB', details: 'Active', threads: 0, latency: 'N/A' },
+    terminal: { name: 'Terminal / Shell', peak: '0 MB', culpritText: 'Nominal', exitCode: '0', spikeRate: 'Stable', isCulprit: false },
+    containers: { name: 'Docker / Services', rss: '0 MB', services: '0 containers', state: 'Idle', ioRate: 'N/A' },
+    browser: { name: 'Browser Subsystem', rss: '0 MB', tabCount: '0 tabs', gpuHeap: 'N/A', warningText: 'Nominal' },
+  },
+};
 
 export const SessionTimelineView: React.FC<SessionTimelineViewProps> = ({
   themeStyle,
   onNavigateToTreemap,
   onOpenBaselineCompare,
+  systemMemoryTotalGb = 16.0,
 }) => {
-  // Scrub position: percentage across the 4-hour window (11:00 to 15:00 = 240 mins)
-  // 13:42:10 is at (162 mins / 240 mins) = 67.5%
-  const [scrubPercent, setScrubPercent] = useState<number>(67.5);
+  const [scrubPercent, setScrubPercent] = useState<number>(100);
   const [timeRange, setTimeRange] = useState<'1h' | '4h' | '8h'>('4h');
+  const [rangeStartIso, setRangeStartIso] = useState<string>('');
+  const [rangeEndIso, setRangeEndIso] = useState<string>('');
+  const [historySeries, setHistorySeries] = useState<Array<{ time: string; total: number; cpu?: number }>>([]);
+
   const [isReplaying, setIsReplaying] = useState<boolean>(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [selectedMarker, setSelectedMarker] = useState<TimelineMarker | null>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
+
+  const [timelineMarkers, setTimelineMarkers] = useState<TimelineMarker[]>([]);
+  const [currentTelemetry, setCurrentTelemetry] = useState<ScrubPointTelemetry>(INITIAL_LIVE_TELEMETRY);
 
   const isPrecision = themeStyle === 'precision';
 
@@ -30,20 +55,49 @@ export const SessionTimelineView: React.FC<SessionTimelineViewProps> = ({
     setTimeout(() => setToastMessage(null), 3000);
   };
 
-  const [timelineMarkers, setTimelineMarkers] = useState<TimelineMarker[]>(TIMELINE_MARKERS);
-  const [currentTelemetry, setCurrentTelemetry] = useState<ScrubPointTelemetry>(
-    SCRUB_TELEMETRY_DATA['13:42:10']
-  );
+  const handleInspectFailure = async (marker: ExecutionMarker) => {
+    if (!marker.executionResultId) {
+      onOpenBaselineCompare();
+      return;
+    }
+    showToast(`Loading failure diff for: ${marker.command || marker.label}...`);
+    try {
+      const diffData = await fetchFailureDiff(marker.executionResultId);
+      if (diffData) {
+        onOpenBaselineCompare(diffData);
+      } else {
+        onOpenBaselineCompare();
+      }
+    } catch {
+      onOpenBaselineCompare();
+    }
+  };
 
-  // Fetch timeline markers
+  // Fetch timeline markers and range boundaries
   useEffect(() => {
     let timer: number;
     const poll = async () => {
       const res = await fetchTimeline(timeRange);
-      if (res && res.markers.length > 0) {
-        setTimelineMarkers(res.markers);
+      if (res) {
+        if (res.markers) setTimelineMarkers(res.markers);
+        if (res.rangeStartIso) setRangeStartIso(res.rangeStartIso);
+        if (res.rangeEndIso) setRangeEndIso(res.rangeEndIso);
       }
       timer = window.setTimeout(poll, 15000);
+    };
+    poll();
+    return () => clearTimeout(timer);
+  }, [timeRange]);
+
+  // Fetch resource history series for waveform
+  useEffect(() => {
+    let timer: number;
+    const poll = async () => {
+      const res = await fetchResourceHistory(timeRange);
+      if (res && res.series && res.series.length > 0) {
+        setHistorySeries(res.series);
+      }
+      timer = window.setTimeout(poll, 10000);
     };
     poll();
     return () => clearTimeout(timer);
@@ -52,47 +106,48 @@ export const SessionTimelineView: React.FC<SessionTimelineViewProps> = ({
   // Fetch telemetry at scrub position
   useEffect(() => {
     let timer: number;
-    // Calculate approximate time based on scrubPercent (0-100) across 4 hours (240 mins)
     const poll = async () => {
-      // In a real implementation we would convert the percent back to a timestamp
-      // based on rangeStartIso. For the mockup we just map it to our 3 states.
-      let timeKey = '13:42:10';
-      if (scrubPercent < 40) timeKey = '11:30:00';
-      else if (scrubPercent > 75) timeKey = '14:28:45';
-      
-      const res = await fetchTelemetryAtTime(timeKey);
+      const startMs = rangeStartIso ? new Date(rangeStartIso).getTime() : Date.now() - (timeRange === '1h' ? 1 : timeRange === '4h' ? 4 : 8) * 3600000;
+      const endMs = rangeEndIso ? new Date(rangeEndIso).getTime() : Date.now();
+      const targetMs = startMs + (scrubPercent / 100) * (endMs - startMs);
+      const targetIso = new Date(targetMs).toISOString();
+
+      const res = await fetchTelemetryAtTime(targetIso);
       if (res) {
         setCurrentTelemetry(res as ScrubPointTelemetry);
-      } else {
-        setCurrentTelemetry(SCRUB_TELEMETRY_DATA[timeKey] || SCRUB_TELEMETRY_DATA['13:42:10']);
       }
     };
-    
-    timer = window.setTimeout(poll, 500); // debounce scrub
-    return () => clearTimeout(timer);
-  }, [scrubPercent]);
 
-  // Jump to Last Anomaly
+    timer = window.setTimeout(poll, 250); // debounce scrub
+    return () => clearTimeout(timer);
+  }, [scrubPercent, rangeStartIso, rangeEndIso, timeRange]);
+
+  // Jump to Last Anomaly Spike
   const handleJumpToAnomaly = () => {
-    setScrubPercent(67.5);
-    showToast('Snapping scrubber to Incident #TRC-89104-e2 (13:42:10 UTC)');
+    const spike = timelineMarkers.find((m) => m.isSpike);
+    if (spike) {
+      setScrubPercent(spike.percentLeft);
+      showToast(`Snapping scrubber to anomaly: ${spike.label} (${spike.timeStr})`);
+    } else {
+      showToast('No critical anomaly spikes detected in active range.');
+    }
   };
 
   // Replay animation
   const handleReplayWindow = () => {
     if (isReplaying) return;
     setIsReplaying(true);
-    setScrubPercent(55); // start around 13:10
-    showToast('Replaying incident telemetry sequence (13:10 -> 14:00)...');
+    setScrubPercent(10);
+    showToast('Replaying session telemetry sequence (0% -> 100%)...');
 
-    let current = 55;
+    let current = 10;
     const interval = setInterval(() => {
-      current += 1.25;
-      if (current >= 75) {
+      current += 2.0;
+      if (current >= 100) {
         clearInterval(interval);
         setIsReplaying(false);
-        setScrubPercent(67.5);
-        showToast('Incident replay completed.');
+        setScrubPercent(100);
+        showToast('Session telemetry replay completed.');
       } else {
         setScrubPercent(current);
       }
@@ -108,24 +163,88 @@ export const SessionTimelineView: React.FC<SessionTimelineViewProps> = ({
     setScrubPercent(pct);
   };
 
+  // Dynamic CSV Export
   const handleExportCSV = () => {
-    const csvContent =
-      'timestamp,ram_usage_gb,cpu_percent,incident_id,culprit\n' +
-      '11:00:00,3.8,14.2,NOMINAL,none\n' +
-      '12:00:00,4.2,22.1,NOMINAL,none\n' +
-      '13:00:00,6.5,45.8,WARNING,webpack\n' +
-      '13:42:10,15.1,98.4,OOM_ANOMALY,cargo_test_release_8192\n' +
-      '14:28:45,6.4,18.2,STABILIZED,none\n';
+    const header = 'timestamp,ram_usage_gb,cpu_percent\n';
+    let rows = '';
+    if (historySeries.length > 0) {
+      rows = historySeries.map((s) => `${s.time},${s.total},${s.cpu ?? 0}`).join('\n');
+    } else {
+      rows = `${currentTelemetry.isoTime},${currentTelemetry.ramUsageGb},${currentTelemetry.cpuPercent}`;
+    }
+    const csvContent = header + rows;
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.setAttribute('download', `devpulse-timeline-${Date.now()}.csv`);
+    link.setAttribute('download', `devpulse-telemetry-${Date.now()}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
     showToast('Exported telemetry timeline CSV.');
   };
+
+  // Dynamic SVG Waveform Calculations
+  const { ramAreaPath, ramStrokePath, cpuStrokePath, scrubberDotY } = useMemo(() => {
+    const ceiling = Math.max(systemMemoryTotalGb, 1.0);
+    const pts = historySeries.length > 0 ? historySeries : [
+      { time: '', total: currentTelemetry.ramUsageGb, cpu: currentTelemetry.cpuPercent },
+      { time: '', total: currentTelemetry.ramUsageGb, cpu: currentTelemetry.cpuPercent }
+    ];
+
+    const n = pts.length;
+    const ramCoords: Array<[number, number]> = [];
+    const cpuCoords: Array<[number, number]> = [];
+
+    for (let i = 0; i < n; i++) {
+      const x = n === 1 ? 500 : (i / (n - 1)) * 1000;
+      const ramVal = pts[i].total || 0;
+      const cpuVal = pts[i].cpu ?? 15;
+
+      const yRam = Math.max(15, Math.min(150, 150 - (ramVal / ceiling) * 135));
+      const yCpu = Math.max(15, Math.min(150, 150 - (cpuVal / 100) * 135));
+
+      ramCoords.push([Math.round(x * 10) / 10, Math.round(yRam * 10) / 10]);
+      cpuCoords.push([Math.round(x * 10) / 10, Math.round(yCpu * 10) / 10]);
+    }
+
+    // Build SVG paths
+    const ramStroke = ramCoords.map((c, i) => `${i === 0 ? 'M' : 'L'} ${c[0]},${c[1]}`).join(' ');
+    const ramArea = `${ramStroke} L 1000,160 L 0,160 Z`;
+    const cpuStroke = cpuCoords.map((c, i) => `${i === 0 ? 'M' : 'L'} ${c[0]},${c[1]}`).join(' ');
+
+    // Estimate scrubber Y position on ram curve
+    const scrubX = (scrubPercent / 100) * 1000;
+    let dotY = 130;
+    for (let i = 0; i < ramCoords.length - 1; i++) {
+      if (scrubX >= ramCoords[i][0] && scrubX <= ramCoords[i + 1][0]) {
+        const segRatio = (scrubX - ramCoords[i][0]) / (ramCoords[i + 1][0] - ramCoords[i][0] || 1);
+        dotY = ramCoords[i][1] + segRatio * (ramCoords[i + 1][1] - ramCoords[i][1]);
+        break;
+      }
+    }
+
+    return {
+      ramAreaPath: ramArea,
+      ramStrokePath: ramStroke,
+      cpuStrokePath: cpuStroke,
+      scrubberDotY: Math.round(dotY * 10) / 10,
+    };
+  }, [historySeries, systemMemoryTotalGb, currentTelemetry, scrubPercent]);
+
+  // Dynamic bottom time ruler labels (7 points)
+  const timeRulerLabels = useMemo(() => {
+    const rangeHours = timeRange === '1h' ? 1 : timeRange === '4h' ? 4 : 8;
+    const startMs = rangeStartIso ? new Date(rangeStartIso).getTime() : Date.now() - rangeHours * 3600000;
+    const endMs = rangeEndIso ? new Date(rangeEndIso).getTime() : Date.now();
+    const labels: string[] = [];
+    const count = 7;
+    for (let i = 0; i < count; i++) {
+      const t = new Date(startMs + (i / (count - 1)) * (endMs - startMs));
+      labels.push(t.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+    }
+    return labels;
+  }, [rangeStartIso, rangeEndIso, timeRange]);
 
   return (
     <div className="flex-1 flex flex-col min-w-0 bg-[#0a0e14] overflow-hidden select-none">
@@ -208,14 +327,14 @@ export const SessionTimelineView: React.FC<SessionTimelineViewProps> = ({
           </button>
 
           <button
-            onClick={() => showToast(`Incident bookmarked at ${currentTelemetry.timeStr}`)}
+            onClick={() => showToast(`Snapshot point bookmarked at ${currentTelemetry.timeStr}`)}
             className={`h-7 px-2.5 border font-mono text-xs text-slate-300 hover:text-white transition-colors cursor-pointer ${
               isPrecision
                 ? 'bg-[#1c2026] hover:bg-[#262a31] border-[#3e484f] rounded-xs'
                 : 'bg-slate-800/60 hover:bg-slate-800 border-slate-700/60 rounded-lg'
             }`}
           >
-            Bookmark Incident
+            Bookmark Timestamp
           </button>
 
           <button
@@ -227,7 +346,7 @@ export const SessionTimelineView: React.FC<SessionTimelineViewProps> = ({
             }`}
           >
             <span className="material-symbols-outlined text-[14px]">download</span>
-            <span>Export Flamegraph</span>
+            <span>Export CSV</span>
           </button>
         </div>
       </section>
@@ -247,14 +366,14 @@ export const SessionTimelineView: React.FC<SessionTimelineViewProps> = ({
           {/* Background Grid & Threshold Guidemarks */}
           <div className="absolute inset-0 bg-grid-telemetry-precision opacity-40 pointer-events-none" />
 
-          {/* Reference lines */}
+          {/* Dynamic Reference lines */}
           <div className="absolute top-2 right-4 text-[10px] font-mono text-rose-400 flex items-center gap-1">
             <span className="w-2 h-0.5 bg-rose-500" />
-            <span>Memory Ceiling (16.0 GB)</span>
+            <span>Memory Ceiling ({systemMemoryTotalGb.toFixed(1)} GB)</span>
           </div>
           <div className="absolute top-8 right-4 text-[10px] font-mono text-amber-400 flex items-center gap-1">
             <span className="w-2 h-0.5 bg-amber-400 border-dashed" />
-            <span>80% Baseline (12.8 GB)</span>
+            <span>80% Baseline ({(systemMemoryTotalGb * 0.8).toFixed(1)} GB)</span>
           </div>
 
           <div className="absolute top-[20%] left-0 right-0 border-b border-rose-900/40 border-dashed pointer-events-none" />
@@ -269,106 +388,44 @@ export const SessionTimelineView: React.FC<SessionTimelineViewProps> = ({
           >
             <defs>
               <linearGradient id="ramGradient" x1="0%" y1="0%" x2="0%" y2="100%">
-                <stop offset="0%" stopColor="#ff5252" stopOpacity="0.4" />
-                <stop offset="50%" stopColor="#38bdf8" stopOpacity="0.2" />
+                <stop offset="0%" stopColor="#38bdf8" stopOpacity="0.35" />
+                <stop offset="60%" stopColor="#38bdf8" stopOpacity="0.1" />
                 <stop offset="100%" stopColor="#38bdf8" stopOpacity="0.0" />
-              </linearGradient>
-              <linearGradient id="cpuGradient" x1="0%" y1="0%" x2="0%" y2="100%">
-                <stop offset="0%" stopColor="#fb923c" stopOpacity="0.3" />
-                <stop offset="100%" stopColor="#fb923c" stopOpacity="0.0" />
               </linearGradient>
             </defs>
 
-            {/* RAM Area Curve */}
-            <path
-              d="
-                M 0,130
-                L 80,128
-                L 150,122
-                L 240,118
-                L 350,115
-                L 450,110
-                L 550,105
-                L 620,95
-                L 650,45
-                L 675,18
-                L 700,75
-                L 740,110
-                L 820,115
-                L 920,112
-                L 1000,110
-                L 1000,160
-                L 0,160
-                Z
-              "
-              fill="url(#ramGradient)"
-            />
+            {/* Dynamic RAM Area Curve */}
+            <path d={ramAreaPath} fill="url(#ramGradient)" />
 
-            {/* RAM Stroke Curve */}
-            <path
-              d="
-                M 0,130
-                L 80,128
-                L 150,122
-                L 240,118
-                L 350,115
-                L 450,110
-                L 550,105
-                L 620,95
-                L 650,45
-                L 675,18
-                L 700,75
-                L 740,110
-                L 820,115
-                L 920,112
-                L 1000,110
-              "
-              fill="none"
-              stroke="#38bdf8"
-              strokeWidth="2.5"
-            />
+            {/* Dynamic RAM Stroke Curve */}
+            <path d={ramStrokePath} fill="none" stroke="#38bdf8" strokeWidth="2.5" />
 
-            {/* CPU Waveform (Amber) */}
+            {/* Dynamic CPU Waveform (Amber dashed) */}
             <path
-              d="
-                M 0,140
-                L 60,135
-                L 140,120
-                L 210,138
-                L 310,110
-                L 420,130
-                L 510,95
-                L 610,120
-                L 655,30
-                L 675,12
-                L 695,45
-                L 730,130
-                L 820,135
-                L 900,142
-                L 1000,138
-              "
+              d={cpuStrokePath}
               fill="none"
               stroke="#fb923c"
               strokeWidth="1.5"
               strokeDasharray="4 2"
             />
 
-            {/* Peak indicator dot at 675 (67.5% = 13:42:10) */}
-            <circle cx="675" cy="18" r="4" fill="#ff5252" className="animate-ping" />
-            <circle cx="675" cy="18" r="4" fill="#ff5252" />
+            {/* Live Scrubber Curve Dot */}
+            <circle
+              cx={(scrubPercent / 100) * 1000}
+              cy={scrubberDotY}
+              r="4.5"
+              fill="#38bdf8"
+              className="animate-pulse"
+            />
           </svg>
 
-          {/* Time Ruler Labels at bottom of waveform */}
+          {/* Dynamic Time Ruler Labels at bottom of waveform */}
           <div className="absolute bottom-1 left-0 right-0 flex justify-between px-6 text-[10px] font-mono text-slate-500 pointer-events-none">
-            <span>11:00</span>
-            <span>11:30</span>
-            <span>12:00</span>
-            <span>12:30</span>
-            <span>13:00</span>
-            <span>13:30</span>
-            <span className="text-amber-400 font-semibold">14:00 (Incident)</span>
-            <span>14:30</span>
-            <span>15:00</span>
+            {timeRulerLabels.map((lbl, idx) => (
+              <span key={idx} className={idx === timeRulerLabels.length - 1 ? 'text-sky-400 font-semibold' : ''}>
+                {lbl}
+              </span>
+            ))}
           </div>
 
           {/* Playhead Scrubber Line + Draggable Badge */}
@@ -387,9 +444,9 @@ export const SessionTimelineView: React.FC<SessionTimelineViewProps> = ({
               <span className="w-1.5 h-1.5 rounded-full bg-rose-500 animate-pulse" />
               <span>
                 {currentTelemetry.timeStr} ·{' '}
-                {scrubPercent >= 60 && scrubPercent <= 72
-                  ? 'OOM Warning Event'
-                  : 'Active Flow'}
+                {currentTelemetry.ramUsageGb > 0
+                  ? `${currentTelemetry.ramUsageGb.toFixed(1)} GB RAM`
+                  : 'Live Telemetry'}
               </span>
             </div>
 
@@ -400,7 +457,7 @@ export const SessionTimelineView: React.FC<SessionTimelineViewProps> = ({
 
         {/* 4 Categorized Horizontal Event Marker Tracks */}
         <div
-          className={`flex-1 flex flex-col divide-y ${
+          className={`flex flex-col divide-y shrink-0 ${
             isPrecision
               ? 'bg-[#10141a] divide-[#3e484f]/40'
               : 'bg-[#0d1117] divide-slate-800/60'
@@ -408,100 +465,141 @@ export const SessionTimelineView: React.FC<SessionTimelineViewProps> = ({
         >
           {/* TRACK 1: IDE / EDITOR */}
           <div className="h-11 px-3 flex items-center relative group hover:bg-[#181c22]/50 transition-colors">
-            <div className="w-32 shrink-0 flex items-center gap-2 font-mono text-xs text-slate-300">
+            <div className="w-28 shrink-0 flex items-center gap-2 font-mono text-xs text-slate-300">
               <span className="w-1.5 h-1.5 rounded-full bg-[#38bdf8]" />
               <span className="truncate">IDE / Editor</span>
             </div>
-            <div className="flex-1 relative h-full flex items-center">
-              {timelineMarkers.filter((m) => m.track === 'ide').map((marker) => (
-                <button
-                  key={marker.id}
-                  onClick={() => setSelectedMarker(marker)}
-                  className={`absolute px-2 py-0.5 text-[10px] font-mono border rounded transition-all cursor-pointer truncate max-w-[200px] ${
-                    marker.isUnderScrubber
-                      ? 'bg-[#38bdf8]/20 text-[#38bdf8] border-[#38bdf8] ring-1 ring-[#38bdf8]/50'
-                      : 'bg-[#1c2026] text-slate-300 border-[#3e484f] hover:border-[#38bdf8]'
-                  }`}
-                  style={{ left: `${marker.percentLeft}%` }}
-                  title={`${marker.timeStr} - ${marker.fullTitle}`}
-                >
-                  {marker.label}
-                </button>
-              ))}
+            <div className="flex-1 relative h-full flex items-center overflow-hidden">
+              {timelineMarkers.filter((m) => m.track === 'ide').length === 0 ? (
+                <span className="text-[11px] font-mono text-slate-600 italic">No IDE events logged in this window</span>
+              ) : (
+                timelineMarkers.filter((m) => m.track === 'ide').map((marker) => (
+                  <button
+                    key={marker.id}
+                    onClick={() => setSelectedMarker(marker)}
+                    className={`absolute px-2 py-0.5 text-[10px] font-mono border rounded transition-all cursor-pointer truncate ${
+                      marker.isUnderScrubber
+                        ? 'bg-[#38bdf8]/20 text-[#38bdf8] border-[#38bdf8] ring-1 ring-[#38bdf8]/50'
+                        : 'bg-[#1c2026] text-slate-300 border-[#3e484f] hover:border-[#38bdf8]'
+                    }`}
+                    style={{ left: `${marker.percentLeft}%`, maxWidth: `${Math.min(180, Math.max(60, (100 - marker.percentLeft) * 1.8))}px` }}
+                    title={`${marker.timeStr} - ${marker.fullTitle}`}
+                  >
+                    {marker.label}
+                  </button>
+                ))
+              )}
             </div>
           </div>
 
           {/* TRACK 2: TERMINAL / SHELL */}
           <div className="h-11 px-3 flex items-center relative group hover:bg-[#181c22]/50 transition-colors">
-            <div className="w-32 shrink-0 flex items-center gap-2 font-mono text-xs text-slate-300">
+            <div className="w-28 shrink-0 flex items-center gap-2 font-mono text-xs text-slate-300">
               <span className="w-1.5 h-1.5 rounded-full bg-[#fb923c]" />
-              <span className="truncate">Terminal / Shell</span>
+              <span className="truncate">Terminal</span>
             </div>
-            <div className="flex-1 relative h-full flex items-center">
-              {timelineMarkers.filter((m) => m.track === 'terminal').map((marker) => (
-                <button
-                  key={marker.id}
-                  onClick={() => setSelectedMarker(marker)}
-                  className={`absolute px-2 py-0.5 text-[10px] font-mono border rounded transition-all cursor-pointer truncate max-w-[210px] ${
-                    marker.isSpike
-                      ? isPrecision
-                        ? 'bg-rose-950 text-rose-200 border-rose-500 font-semibold ring-2 ring-rose-500/50'
-                        : 'bg-amber-500/20 text-amber-200 border-amber-500 ring-2 ring-amber-500/40 font-semibold'
-                      : 'bg-[#1c2026] text-slate-300 border-[#3e484f] hover:border-[#fb923c]'
-                  }`}
-                  style={{ left: `${marker.percentLeft}%` }}
-                  title={`${marker.timeStr} - ${marker.fullTitle}`}
-                >
-                  {marker.isSpike && '⚠️ '}
-                  {marker.label}
-                </button>
-              ))}
+            <div className="flex-1 relative h-full flex items-center overflow-hidden">
+              {timelineMarkers.filter((m) => m.track === 'terminal').length === 0 ? (
+                <span className="text-[11px] font-mono text-slate-600 italic">No terminal command events logged</span>
+              ) : (
+                timelineMarkers.filter((m) => m.track === 'terminal').map((marker) => {
+                  const execMarker = marker as ExecutionMarker;
+                  const isExec = Boolean(execMarker.executionResultId);
+                  const isFailure = isExec && execMarker.passed === false;
+
+                  return (
+                    <button
+                      key={marker.id}
+                      onClick={() => {
+                        setSelectedMarker(marker);
+                        if (isFailure) {
+                          handleInspectFailure(execMarker);
+                        }
+                      }}
+                      className={`absolute px-2 py-0.5 text-[10px] font-mono border rounded transition-all cursor-pointer truncate flex items-center gap-1 ${
+                        isFailure
+                          ? 'bg-rose-950 text-rose-200 border-rose-500 font-semibold ring-2 ring-rose-500/50'
+                          : isExec
+                          ? 'bg-emerald-950/60 text-emerald-200 border-emerald-600/60 hover:border-emerald-400'
+                          : marker.isSpike
+                          ? isPrecision
+                            ? 'bg-rose-950 text-rose-200 border-rose-500 font-semibold ring-2 ring-rose-500/50'
+                            : 'bg-amber-500/20 text-amber-200 border-amber-500 ring-2 ring-amber-500/40 font-semibold'
+                          : 'bg-[#1c2026] text-slate-300 border-[#3e484f] hover:border-[#fb923c]'
+                      }`}
+                      style={{ left: `${marker.percentLeft}%`, maxWidth: `${Math.min(180, Math.max(60, (100 - marker.percentLeft) * 1.8))}px` }}
+                      title={
+                        isFailure
+                          ? `FAILED: ${execMarker.command || marker.label} — Click to inspect failure diff`
+                          : `${marker.timeStr} - ${marker.fullTitle}`
+                      }
+                    >
+                      {isExec ? (
+                        <span className={execMarker.passed ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
+                          {execMarker.passed ? '✓' : '✗'}
+                        </span>
+                      ) : marker.isSpike ? (
+                        '⚠️ '
+                      ) : null}
+                      <span className="truncate">{marker.label}</span>
+                    </button>
+                  );
+                })
+              )}
             </div>
           </div>
 
           {/* TRACK 3: GIT / CONTAINERS */}
           <div className="h-11 px-3 flex items-center relative group hover:bg-[#181c22]/50 transition-colors">
-            <div className="w-32 shrink-0 flex items-center gap-2 font-mono text-xs text-slate-300">
+            <div className="w-28 shrink-0 flex items-center gap-2 font-mono text-xs text-slate-300">
               <span className="w-1.5 h-1.5 rounded-full bg-[#4ade80]" />
-              <span className="truncate">Git / Containers</span>
+              <span className="truncate">Git / Docker</span>
             </div>
-            <div className="flex-1 relative h-full flex items-center">
-              {timelineMarkers.filter((m) => m.track === 'containers').map((marker) => (
-                <button
-                  key={marker.id}
-                  onClick={() => setSelectedMarker(marker)}
-                  className="absolute px-2 py-0.5 text-[10px] font-mono border rounded transition-all cursor-pointer truncate max-w-[190px] bg-[#1c2026] text-slate-300 border-[#3e484f] hover:border-[#4ade80]"
-                  style={{ left: `${marker.percentLeft}%` }}
-                  title={`${marker.timeStr} - ${marker.fullTitle}`}
-                >
-                  {marker.label}
-                </button>
-              ))}
+            <div className="flex-1 relative h-full flex items-center overflow-hidden">
+              {timelineMarkers.filter((m) => m.track === 'containers').length === 0 ? (
+                <span className="text-[11px] font-mono text-slate-600 italic">No git or container lifecycle events</span>
+              ) : (
+                timelineMarkers.filter((m) => m.track === 'containers').map((marker) => (
+                  <button
+                    key={marker.id}
+                    onClick={() => setSelectedMarker(marker)}
+                    className="absolute px-2 py-0.5 text-[10px] font-mono border rounded transition-all cursor-pointer truncate bg-[#1c2026] text-slate-300 border-[#3e484f] hover:border-[#4ade80]"
+                    style={{ left: `${marker.percentLeft}%`, maxWidth: `${Math.min(180, Math.max(60, (100 - marker.percentLeft) * 1.8))}px` }}
+                    title={`${marker.timeStr} - ${marker.fullTitle}`}
+                  >
+                    {marker.label}
+                  </button>
+                ))
+              )}
             </div>
           </div>
 
           {/* TRACK 4: BROWSER TABS */}
           <div className="h-11 px-3 flex items-center relative group hover:bg-[#181c22]/50 transition-colors">
-            <div className="w-32 shrink-0 flex items-center gap-2 font-mono text-xs text-slate-300">
+            <div className="w-28 shrink-0 flex items-center gap-2 font-mono text-xs text-slate-300">
               <span className="w-1.5 h-1.5 rounded-full bg-[#c084fc]" />
-              <span className="truncate">Browser Tabs</span>
+              <span className="truncate">Browser</span>
             </div>
-            <div className="flex-1 relative h-full flex items-center">
-              {timelineMarkers.filter((m) => m.track === 'browser').map((marker) => (
-                <button
-                  key={marker.id}
-                  onClick={() => setSelectedMarker(marker)}
-                  className={`absolute px-2 py-0.5 text-[10px] font-mono border rounded transition-all cursor-pointer truncate max-w-[220px] ${
-                    marker.isUnderScrubber
-                      ? 'bg-purple-950/70 text-purple-200 border-purple-400 ring-1 ring-purple-400/50'
-                      : 'bg-[#1c2026] text-slate-300 border-[#3e484f] hover:border-[#c084fc]'
-                  }`}
-                  style={{ left: `${marker.percentLeft}%` }}
-                  title={`${marker.timeStr} - ${marker.fullTitle}`}
-                >
-                  {marker.label}
-                </button>
-              ))}
+            <div className="flex-1 relative h-full flex items-center overflow-hidden">
+              {timelineMarkers.filter((m) => m.track === 'browser').length === 0 ? (
+                <span className="text-[11px] font-mono text-slate-600 italic">No browser tab lifecycle events</span>
+              ) : (
+                timelineMarkers.filter((m) => m.track === 'browser').map((marker) => (
+                  <button
+                    key={marker.id}
+                    onClick={() => setSelectedMarker(marker)}
+                    className={`absolute px-2 py-0.5 text-[10px] font-mono border rounded transition-all cursor-pointer truncate ${
+                      marker.isUnderScrubber
+                        ? 'bg-purple-950/70 text-purple-200 border-purple-400 ring-1 ring-purple-400/50'
+                        : 'bg-[#1c2026] text-slate-300 border-[#3e484f] hover:border-[#c084fc]'
+                    }`}
+                    style={{ left: `${marker.percentLeft}%`, maxWidth: `${Math.min(180, Math.max(60, (100 - marker.percentLeft) * 1.8))}px` }}
+                    title={`${marker.timeStr} - ${marker.fullTitle}`}
+                  >
+                    {marker.label}
+                  </button>
+                ))
+              )}
             </div>
           </div>
         </div>
@@ -519,6 +617,16 @@ export const SessionTimelineView: React.FC<SessionTimelineViewProps> = ({
               <span className="text-slate-400 truncate hidden sm:inline">
                 {selectedMarker.details}
               </span>
+              {(selectedMarker as ExecutionMarker).executionResultId &&
+                (selectedMarker as ExecutionMarker).passed === false && (
+                  <button
+                    onClick={() => handleInspectFailure(selectedMarker as ExecutionMarker)}
+                    className="ml-2 px-2.5 py-0.5 bg-rose-900/70 hover:bg-rose-800 border border-rose-500 rounded text-rose-200 cursor-pointer flex items-center gap-1 text-[11px] font-mono whitespace-nowrap shadow transition-colors"
+                  >
+                    <span className="material-symbols-outlined text-[13px]">troubleshoot</span>
+                    <span>Inspect Failure Diff & Culprits</span>
+                  </button>
+                )}
             </div>
             <button
               onClick={() => setSelectedMarker(null)}
@@ -529,23 +637,23 @@ export const SessionTimelineView: React.FC<SessionTimelineViewProps> = ({
           </div>
         )}
 
-        {/* Bottom Contextual Detail Inspection Panel */}
+        {/* Bottom Contextual Detail Panel — Compact */}
         <section
-          className={`border-t p-4 flex flex-col gap-3 shrink-0 ${
+          className={`border-t p-3 flex flex-col gap-2 shrink-0 ${
             isPrecision
               ? 'bg-[#181c22] border-[#3e484f]'
               : 'bg-[#0f141a] border-slate-800/80'
           }`}
         >
-          {/* Header row */}
-          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-700/50 pb-2.5">
-            <div className="flex items-center gap-3">
-              <span className="font-mono text-sm font-semibold text-white">
-                {currentTelemetry.isoTime}
+          {/* Header row: Timestamp + Badge + Actions */}
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="font-mono text-xs font-semibold text-white whitespace-nowrap">
+                {currentTelemetry.isoTime ? new Date(currentTelemetry.isoTime).toLocaleTimeString() : currentTelemetry.timeStr}
               </span>
               <span
-                className={`px-2 py-0.5 font-mono text-xs font-bold uppercase rounded border ${
-                  currentTelemetry.anomalyBadge === 'OOM_ANOMALY'
+                className={`px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase rounded border whitespace-nowrap ${
+                  currentTelemetry.anomalyBadge && currentTelemetry.anomalyBadge.includes('High')
                     ? isPrecision
                       ? 'bg-rose-950 text-rose-300 border-rose-500'
                       : 'bg-amber-500/20 text-amber-300 border-amber-500/40'
@@ -554,25 +662,28 @@ export const SessionTimelineView: React.FC<SessionTimelineViewProps> = ({
               >
                 {currentTelemetry.anomalyBadge}
               </span>
+              <span className="text-[11px] text-slate-400 font-mono truncate hidden md:inline">
+                {currentTelemetry.narrativeHeadline}
+              </span>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5 shrink-0">
               <button
-                onClick={() => onNavigateToTreemap('proc-webpack')}
-                className={`px-3 py-1 text-xs font-mono font-medium border flex items-center gap-1.5 transition-colors cursor-pointer ${
+                onClick={() => onNavigateToTreemap()}
+                className={`px-2.5 py-1 text-[11px] font-mono font-medium border flex items-center gap-1 transition-colors cursor-pointer ${
                   isPrecision
                     ? 'bg-[#262a31] hover:bg-[#31353c] border-[#3e484f] text-[#38bdf8] rounded-xs'
                     : 'bg-sky-500/15 hover:bg-sky-500/25 border-sky-500/30 text-sky-200 rounded-lg'
                 }`}
               >
-                <span className="material-symbols-outlined text-[13px]">search</span>
-                <span>Pinpoint / Inspect in Treemap</span>
+                <span className="material-symbols-outlined text-[12px]">search</span>
+                <span>Inspect in Treemap</span>
               </button>
 
               <button
                 onClick={handleReplayWindow}
                 disabled={isReplaying}
-                className={`px-3 py-1 text-xs font-mono border flex items-center gap-1.5 transition-colors cursor-pointer ${
+                className={`px-2.5 py-1 text-[11px] font-mono border flex items-center gap-1 transition-colors cursor-pointer ${
                   isReplaying
                     ? 'opacity-50 cursor-not-allowed bg-slate-800'
                     : isPrecision
@@ -580,164 +691,83 @@ export const SessionTimelineView: React.FC<SessionTimelineViewProps> = ({
                     : 'bg-slate-800 hover:bg-slate-700 border-slate-700 text-slate-200 rounded-lg'
                 }`}
               >
-                <span className="material-symbols-outlined text-[13px]">
+                <span className="material-symbols-outlined text-[12px]">
                   {isReplaying ? 'sync' : 'replay'}
                 </span>
-                <span>{isReplaying ? 'Replaying...' : 'Replay Window'}</span>
+                <span>{isReplaying ? 'Replaying...' : 'Replay'}</span>
               </button>
 
               <button
-                onClick={onOpenBaselineCompare}
-                className={`px-3 py-1 text-xs font-mono border flex items-center gap-1.5 transition-colors cursor-pointer ${
+                onClick={() => onOpenBaselineCompare()}
+                className={`px-2.5 py-1 text-[11px] font-mono border flex items-center gap-1 transition-colors cursor-pointer ${
                   isPrecision
                     ? 'bg-[#1c2026] hover:bg-[#262a31] border-[#3e484f] text-[#dfe2eb] rounded-xs'
                     : 'bg-slate-800 hover:bg-slate-700 border-slate-700 text-slate-200 rounded-lg'
                 }`}
               >
-                <span className="material-symbols-outlined text-[13px]">compare</span>
-                <span>Compare Baseline</span>
+                <span className="material-symbols-outlined text-[12px]">compare</span>
+                <span>Baseline</span>
               </button>
             </div>
           </div>
 
-          {/* Incident narrative */}
-          <div className="flex items-start gap-3 p-3 bg-[#10141a] border border-slate-800/80 rounded-lg">
-            <span className="material-symbols-outlined text-amber-400 mt-0.5">
-              crisis_alert
+          {/* Compact narrative + swap info */}
+          <div className="flex items-center gap-2 px-2 py-1.5 bg-[#10141a] border border-slate-800/60 rounded text-[11px]">
+            <span className="material-symbols-outlined text-amber-400 text-sm shrink-0">crisis_alert</span>
+            <p className="text-slate-400 font-sans truncate">
+              {currentTelemetry.narrativeBody}
+            </p>
+            <span className="font-mono text-amber-300/80 whitespace-nowrap shrink-0 hidden lg:inline">
+              {currentTelemetry.swapThrashingText}
             </span>
-            <div className="flex flex-col gap-1 text-xs">
-              <span className="font-semibold text-slate-200">
-                {currentTelemetry.narrativeHeadline}
-              </span>
-              <p className="text-slate-400 leading-relaxed font-sans">
-                {currentTelemetry.narrativeBody}
-              </p>
-              <span className="text-[11px] font-mono text-amber-300/90 mt-0.5">
-                {currentTelemetry.swapThrashingText}
-              </span>
-            </div>
           </div>
 
-          {/* Active Tools Matrix at scrub time (4 Subsystem status cards) */}
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-2.5">
-            {/* 1. IDE Subsystem */}
-            <div
-              className={`p-2.5 border flex flex-col justify-between text-xs font-mono ${
-                isPrecision
-                  ? 'bg-[#1c2026] border-[#3e484f] rounded-xs'
-                  : 'bg-slate-900/80 border-slate-800 rounded-lg'
-              }`}
-            >
-              <div>
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-400 text-[11px]">IDE Subsystem</span>
-                  <span className="text-sky-300 font-semibold">
-                    {currentTelemetry.subsystems.ide.rss}
-                  </span>
-                </div>
-                <div className="font-semibold text-slate-200 mt-1">
-                  {currentTelemetry.subsystems.ide.name}
-                </div>
-                <p className="text-[11px] text-slate-400 mt-0.5 font-sans">
-                  {currentTelemetry.subsystems.ide.details}
-                </p>
+          {/* Compact Subsystem Status Row */}
+          <div className="flex items-stretch gap-2 overflow-x-auto">
+            {/* IDE */}
+            <div className={`flex-1 min-w-0 px-2.5 py-1.5 border flex items-center justify-between text-[11px] font-mono ${
+              isPrecision ? 'bg-[#1c2026] border-[#3e484f] rounded-xs' : 'bg-slate-900/80 border-slate-800 rounded-lg'
+            }`}>
+              <div className="flex items-center gap-1.5 min-w-0">
+                <span className="w-1.5 h-1.5 rounded-full bg-[#38bdf8] shrink-0" />
+                <span className="text-slate-300 truncate">{currentTelemetry.subsystems.ide.name}</span>
               </div>
-              <div className="border-t border-slate-700/40 pt-1.5 mt-2 flex justify-between text-[10px] text-slate-400">
-                <span>Threads: {currentTelemetry.subsystems.ide.threads}</span>
-                <span>Latency: {currentTelemetry.subsystems.ide.latency}</span>
-              </div>
+              <span className="text-sky-300 font-semibold shrink-0 ml-2">{currentTelemetry.subsystems.ide.rss}</span>
             </div>
 
-            {/* 2. Terminal / Exec (Culprit callout) */}
-            <div
-              className={`p-2.5 border flex flex-col justify-between text-xs font-mono ${
-                currentTelemetry.subsystems.terminal.isCulprit
-                  ? isPrecision
-                    ? 'bg-rose-950/25 border-rose-500/70 rounded-xs'
-                    : 'bg-amber-950/20 border-amber-500/60 rounded-lg'
-                  : isPrecision
-                  ? 'bg-[#1c2026] border-[#3e484f] rounded-xs'
-                  : 'bg-slate-900/80 border-slate-800 rounded-lg'
-              }`}
-            >
-              <div>
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-400 text-[11px]">Terminal / Exec</span>
-                  <span className="text-amber-400 font-semibold">
-                    {currentTelemetry.subsystems.terminal.peak}
-                  </span>
-                </div>
-                <div className="font-semibold text-rose-300 mt-1 truncate">
-                  {currentTelemetry.subsystems.terminal.name}
-                </div>
-                <p className="text-[11px] text-rose-400/90 mt-0.5 font-sans">
-                  {currentTelemetry.subsystems.terminal.culpritText}
-                </p>
+            {/* Terminal */}
+            <div className={`flex-1 min-w-0 px-2.5 py-1.5 border flex items-center justify-between text-[11px] font-mono ${
+              currentTelemetry.subsystems.terminal.isCulprit
+                ? isPrecision ? 'bg-rose-950/25 border-rose-500/70 rounded-xs' : 'bg-amber-950/20 border-amber-500/60 rounded-lg'
+                : isPrecision ? 'bg-[#1c2026] border-[#3e484f] rounded-xs' : 'bg-slate-900/80 border-slate-800 rounded-lg'
+            }`}>
+              <div className="flex items-center gap-1.5 min-w-0">
+                <span className="w-1.5 h-1.5 rounded-full bg-[#fb923c] shrink-0" />
+                <span className="text-rose-300 truncate">{currentTelemetry.subsystems.terminal.name}</span>
               </div>
-              <div className="border-t border-slate-700/40 pt-1.5 mt-2 flex justify-between text-[10px] text-slate-400">
-                <span>Exit: {currentTelemetry.subsystems.terminal.exitCode}</span>
-                <span className="text-rose-400">
-                  {currentTelemetry.subsystems.terminal.spikeRate}
-                </span>
-              </div>
+              <span className="text-amber-400 font-semibold shrink-0 ml-2">{currentTelemetry.subsystems.terminal.peak}</span>
             </div>
 
-            {/* 3. Containers & Git */}
-            <div
-              className={`p-2.5 border flex flex-col justify-between text-xs font-mono ${
-                isPrecision
-                  ? 'bg-[#1c2026] border-[#3e484f] rounded-xs'
-                  : 'bg-slate-900/80 border-slate-800 rounded-lg'
-              }`}
-            >
-              <div>
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-400 text-[11px]">Containers &amp; Git</span>
-                  <span className="text-emerald-400 font-semibold">
-                    {currentTelemetry.subsystems.containers.rss}
-                  </span>
-                </div>
-                <div className="font-semibold text-slate-200 mt-1">
-                  {currentTelemetry.subsystems.containers.name}
-                </div>
-                <p className="text-[11px] text-slate-400 mt-0.5 font-sans">
-                  {currentTelemetry.subsystems.containers.services}
-                </p>
+            {/* Containers */}
+            <div className={`flex-1 min-w-0 px-2.5 py-1.5 border flex items-center justify-between text-[11px] font-mono ${
+              isPrecision ? 'bg-[#1c2026] border-[#3e484f] rounded-xs' : 'bg-slate-900/80 border-slate-800 rounded-lg'
+            }`}>
+              <div className="flex items-center gap-1.5 min-w-0">
+                <span className="w-1.5 h-1.5 rounded-full bg-[#4ade80] shrink-0" />
+                <span className="text-slate-300 truncate">{currentTelemetry.subsystems.containers.name}</span>
               </div>
-              <div className="border-t border-slate-700/40 pt-1.5 mt-2 flex justify-between text-[10px] text-slate-400">
-                <span>State: {currentTelemetry.subsystems.containers.state}</span>
-                <span>I/O: {currentTelemetry.subsystems.containers.ioRate}</span>
-              </div>
+              <span className="text-emerald-400 font-semibold shrink-0 ml-2">{currentTelemetry.subsystems.containers.rss}</span>
             </div>
 
-            {/* 4. Web Runtime */}
-            <div
-              className={`p-2.5 border flex flex-col justify-between text-xs font-mono ${
-                isPrecision
-                  ? 'bg-[#1c2026] border-[#3e484f] rounded-xs'
-                  : 'bg-slate-900/80 border-slate-800 rounded-lg'
-              }`}
-            >
-              <div>
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-400 text-[11px]">Web Runtime</span>
-                  <span className="text-purple-300 font-semibold">
-                    {currentTelemetry.subsystems.browser.rss}
-                  </span>
-                </div>
-                <div className="font-semibold text-slate-200 mt-1">
-                  {currentTelemetry.subsystems.browser.name}
-                </div>
-                <p className="text-[11px] text-slate-400 mt-0.5 font-sans">
-                  {currentTelemetry.subsystems.browser.tabCount}
-                </p>
+            {/* Browser */}
+            <div className={`flex-1 min-w-0 px-2.5 py-1.5 border flex items-center justify-between text-[11px] font-mono ${
+              isPrecision ? 'bg-[#1c2026] border-[#3e484f] rounded-xs' : 'bg-slate-900/80 border-slate-800 rounded-lg'
+            }`}>
+              <div className="flex items-center gap-1.5 min-w-0">
+                <span className="w-1.5 h-1.5 rounded-full bg-[#c084fc] shrink-0" />
+                <span className="text-slate-300 truncate">{currentTelemetry.subsystems.browser.name}</span>
               </div>
-              <div className="border-t border-slate-700/40 pt-1.5 mt-2 flex justify-between text-[10px] text-slate-400">
-                <span>GPU Heap: {currentTelemetry.subsystems.browser.gpuHeap}</span>
-                <span className="text-amber-400">
-                  {currentTelemetry.subsystems.browser.warningText}
-                </span>
-              </div>
+              <span className="text-purple-300 font-semibold shrink-0 ml-2">{currentTelemetry.subsystems.browser.rss}</span>
             </div>
           </div>
         </section>

@@ -1,11 +1,13 @@
 import React, { useState, useEffect } from 'react';
-import { ViewMode, ThemeStyle } from '../types';
+import { ViewMode, ThemeStyle, ProcessNode } from '../types';
+import { fetchDaemonHealth, DaemonHealthInfo, fetchProjectInfo } from '../services/api';
 
 interface SideNavProps {
   currentView: ViewMode;
   onViewChange: (view: ViewMode) => void;
   themeStyle: ThemeStyle;
   activeTabsCount: number;
+  processes?: ProcessNode[];
 }
 
 export const SideNav: React.FC<SideNavProps> = ({
@@ -13,9 +15,28 @@ export const SideNav: React.FC<SideNavProps> = ({
   onViewChange,
   themeStyle,
   activeTabsCount,
+  processes = [],
 }) => {
   const [isRecording, setIsRecording] = useState(false);
   const [recSeconds, setRecSeconds] = useState(0);
+  const [daemonInfo, setDaemonInfo] = useState<DaemonHealthInfo | null>(null);
+  const [projectName, setProjectName] = useState<string>('DevPulse');
+
+  useEffect(() => {
+    fetchProjectInfo().then((info) => {
+      if (info?.displayName) {
+        setProjectName(info.displayName);
+      }
+    });
+
+    const checkHealth = async () => {
+      const h = await fetchDaemonHealth();
+      setDaemonInfo(h);
+    };
+    checkHealth();
+    const timer = setInterval(checkHealth, 5000);
+    return () => clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     let timer: any;
@@ -34,6 +55,11 @@ export const SideNav: React.FC<SideNavProps> = ({
   };
 
   const isPrecision = themeStyle === 'precision';
+
+  const ideCount = processes.filter((p) => p.subsystem === 'ide').length;
+  const terminalCount = processes.filter((p) => p.subsystem === 'terminal').length;
+  const containerCount = processes.filter((p) => p.subsystem === 'containers').length;
+  const browserCount = activeTabsCount > 0 ? activeTabsCount : processes.filter((p) => p.subsystem === 'browser').length;
 
   return (
     <aside
@@ -73,11 +99,11 @@ export const SideNav: React.FC<SideNavProps> = ({
                   : 'bg-slate-800 text-slate-400'
               }`}
             >
-              v2.4
+              v0.1.0
             </span>
           </div>
           <span className="text-[10px] font-mono text-slate-400 truncate mt-0.5">
-            mono-repo / core-engine
+            {projectName}
           </span>
         </div>
       </div>
@@ -190,7 +216,7 @@ export const SideNav: React.FC<SideNavProps> = ({
                 <span className="flex items-center gap-1.5 text-slate-300 text-[11px]">
                   <span className="w-1.5 h-1.5 rounded-full bg-[#38bdf8]" /> IDE Processes
                 </span>
-                <span className="text-slate-500 text-[11px]">4 Active</span>
+                <span className="text-slate-400 text-[11px] font-mono">{ideCount} Active</span>
               </div>
               <div
                 onClick={() => onViewChange('treemap')}
@@ -199,7 +225,7 @@ export const SideNav: React.FC<SideNavProps> = ({
                 <span className="flex items-center gap-1.5 text-slate-300 text-[11px]">
                   <span className="w-1.5 h-1.5 rounded-full bg-[#fb923c]" /> Terminals / CLI
                 </span>
-                <span className="text-slate-500 text-[11px]">2 Active</span>
+                <span className="text-slate-400 text-[11px] font-mono">{terminalCount} Active</span>
               </div>
               <div
                 onClick={() => onViewChange('treemap')}
@@ -208,7 +234,9 @@ export const SideNav: React.FC<SideNavProps> = ({
                 <span className="flex items-center gap-1.5 text-slate-300 text-[11px]">
                   <span className="w-1.5 h-1.5 rounded-full bg-[#4ade80]" /> Docker &amp; Git
                 </span>
-                <span className="text-slate-500 text-[11px]">Up (6)</span>
+                <span className="text-slate-400 text-[11px] font-mono">
+                  {containerCount > 0 ? `${containerCount} Active` : 'None'}
+                </span>
               </div>
               <div
                 onClick={() => onViewChange('tabs')}
@@ -217,7 +245,9 @@ export const SideNav: React.FC<SideNavProps> = ({
                 <span className="flex items-center gap-1.5 text-slate-300 text-[11px]">
                   <span className="w-1.5 h-1.5 rounded-full bg-[#c084fc]" /> Browser Instances
                 </span>
-                <span className="text-slate-500 text-[11px]">42 Tabs</span>
+                <span className="text-slate-400 text-[11px] font-mono">
+                  {browserCount > 0 ? `${browserCount} Active` : '0 Tabs'}
+                </span>
               </div>
             </div>
           </div>
@@ -230,13 +260,24 @@ export const SideNav: React.FC<SideNavProps> = ({
           }`}
         >
           <div className="flex items-center gap-1.5 px-1">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0 animate-pulse" />
-            <span className="truncate">DevPulse Daemon: 0.8% CPU · 42MB</span>
+            <span
+              className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                daemonInfo?.status === 'healthy' ? 'bg-emerald-400 animate-pulse' : 'bg-rose-500'
+              }`}
+            />
+            <span className="truncate">
+              {daemonInfo?.daemon
+                ? `DevPulse Daemon: ${daemonInfo.daemon.cpu_percent}% CPU · ${daemonInfo.daemon.rss_mb} MB`
+                : daemonInfo?.status === 'healthy'
+                ? 'DevPulse Daemon: Active'
+                : 'DevPulse Daemon: Offline'}
+            </span>
           </div>
           <div className="flex items-center justify-between px-1 text-slate-500 text-[9px]">
-            <span>v2.14.8-telemetry</span>
-            <span className="flex items-center gap-1 text-emerald-400/80">
-              <span className="w-1 h-1 bg-emerald-400 rounded-full" /> Synced
+            <span>v0.1.0-live</span>
+            <span className={`flex items-center gap-1 ${daemonInfo?.status === 'healthy' ? 'text-emerald-400/80' : 'text-rose-400/80'}`}>
+              <span className={`w-1 h-1 rounded-full ${daemonInfo?.status === 'healthy' ? 'bg-emerald-400' : 'bg-rose-400'}`} />
+              {daemonInfo?.status === 'healthy' ? 'Connected' : 'Disconnected'}
             </span>
           </div>
         </div>

@@ -110,6 +110,33 @@ DIAG_IDLE_PROCESS_MINUTES = 30         # flag process idle this long with >200MB
 DIAG_DOCKER_OVERHEAD_GB = 3.0          # flag Docker total RAM above this
 
 # ---------------------------------------------------------------------------
+# Tab Classification
+# ---------------------------------------------------------------------------
+STALE_TAB_THRESHOLD_MINUTES = 30          # tab is stale if idle longer than this
+STALE_TAB_ACTIVE_MS_THRESHOLD = 60000     # AND cumulative active time below this (ms)
+DUPLICATE_TAB_SIMILARITY_THRESHOLD = 0.5  # Jaccard similarity above this → duplicate
+
+# ---------------------------------------------------------------------------
+# Shadow Repository
+# ---------------------------------------------------------------------------
+SHADOW_SNAPSHOT_DEBOUNCE_SECONDS = 10     # min interval between file-save snapshots
+
+# ---------------------------------------------------------------------------
+# Project identification
+# ---------------------------------------------------------------------------
+PROJECT_ROOT = os.environ.get("DEVPULSE_PROJECT_ROOT", str(Path.cwd()))
+
+# ---------------------------------------------------------------------------
+# Fix executor — whitelisted cache directories for safe clearing
+# ---------------------------------------------------------------------------
+SAFE_CACHE_PATTERNS: list[str] = [
+    "node_modules/.cache",
+    ".next/cache",
+    "__pycache__",
+    ".pytest_cache",
+]
+
+# ---------------------------------------------------------------------------
 # Frontend CORS
 # ---------------------------------------------------------------------------
 CORS_ORIGINS = [

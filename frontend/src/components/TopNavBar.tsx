@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { ViewMode, ThemeStyle } from '../types';
+import { fetchProjectInfo } from '../services/api';
 
 interface TopNavBarProps {
   currentView: ViewMode;
@@ -9,6 +10,8 @@ interface TopNavBarProps {
   onToggleObserver: () => void;
   onOpenSnapshotDump: () => void;
   systemMemoryUsedGb: number;
+  systemMemoryTotalGb?: number;
+  isBackendConnected?: boolean;
 }
 
 export const TopNavBar: React.FC<TopNavBarProps> = ({
@@ -19,8 +22,19 @@ export const TopNavBar: React.FC<TopNavBarProps> = ({
   onToggleObserver,
   onOpenSnapshotDump,
   systemMemoryUsedGb,
+  systemMemoryTotalGb = 16.0,
+  isBackendConnected = true,
 }) => {
-  const [seconds, setSeconds] = useState(6138); // 01h 42m 18s
+  const [seconds, setSeconds] = useState(0);
+  const [projectName, setProjectName] = useState<string>('DevPulse');
+
+  useEffect(() => {
+    fetchProjectInfo().then((info) => {
+      if (info?.displayName) {
+        setProjectName(info.displayName);
+      }
+    });
+  }, []);
 
   useEffect(() => {
     if (isObserverPaused) return;
@@ -52,12 +66,25 @@ export const TopNavBar: React.FC<TopNavBarProps> = ({
         <div className="flex items-center gap-2 shrink-0">
           <span
             className={`w-2 h-2 rounded-full ${
-              isObserverPaused ? 'bg-amber-400' : 'bg-[#38bdf8] animate-pulse'
+              !isBackendConnected
+                ? 'bg-rose-500'
+                : isObserverPaused
+                ? 'bg-amber-400'
+                : 'bg-[#38bdf8] animate-pulse'
             }`}
           />
           <span className="text-sm font-semibold tracking-tight text-white">DevPulse</span>
+          <span
+            className={`text-[10px] font-mono px-1.5 py-0.2 rounded border ${
+              isBackendConnected
+                ? 'bg-emerald-950/60 text-emerald-400 border-emerald-600/40'
+                : 'bg-rose-950/60 text-rose-400 border-rose-600/40'
+            }`}
+          >
+            {isBackendConnected ? 'LIVE' : 'OFFLINE'}
+          </span>
           <span className="text-slate-500 font-mono text-xs">/</span>
-          <span className="text-[#8ed5ff] font-mono text-xs truncate">mono-repo / core-engine</span>
+          <span className="text-[#8ed5ff] font-mono text-xs truncate">{projectName}</span>
         </div>
 
         <div className="hidden lg:flex items-center gap-3 text-slate-400 font-mono text-xs border-l border-slate-700/60 pl-4">
@@ -73,7 +100,7 @@ export const TopNavBar: React.FC<TopNavBarProps> = ({
               memory
             </span>
             <span>
-              Memory: <strong className="text-slate-200 font-semibold">{systemMemoryUsedGb.toFixed(2)} GB</strong> / 16 GB
+              Memory: <strong className="text-slate-200 font-semibold">{systemMemoryUsedGb.toFixed(2)} GB</strong> / {systemMemoryTotalGb.toFixed(1)} GB
             </span>
           </span>
         </div>

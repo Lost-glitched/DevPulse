@@ -26,10 +26,17 @@ async def get_db() -> aiosqlite.Connection:
 
 
 async def init_db() -> None:
-    """Run schema.sql to create tables and indices if they don't exist."""
+    """Run schema.sql to create tables and indices if they don't exist, and migrate columns."""
     schema_sql = Path(SCHEMA_PATH).read_text(encoding="utf-8")
     db = await get_db()
     try:
+        # Check if events table exists; if so, ensure project_id column exists before running schema indices
+        cursor = await db.execute("PRAGMA table_info(events)")
+        columns = [row[1] for row in await cursor.fetchall()]
+        if columns and "project_id" not in columns:
+            await db.execute("ALTER TABLE events ADD COLUMN project_id TEXT")
+            await db.commit()
+
         await db.executescript(schema_sql)
         await db.commit()
     finally:
@@ -42,6 +49,7 @@ def make_event(
     event_type: str,
     payload: dict[str, Any] | None = None,
     task_context_id: str | None = None,
+    project_id: str | None = None,
 ) -> dict[str, Any]:
     """Create a well-formed event dict ready for insertion."""
     return {
@@ -52,6 +60,7 @@ def make_event(
         "event_type": event_type,
         "payload": payload or {},
         "task_context_id": task_context_id,
+        "project_id": project_id,
     }
 
 
@@ -61,8 +70,8 @@ async def write_event(event: dict[str, Any]) -> None:
     try:
         await db.execute(
             """INSERT OR IGNORE INTO events
-               (id, timestamp, source, category, event_type, payload, task_context_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+               (id, timestamp, source, category, event_type, payload, task_context_id, project_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 event["id"],
                 event["timestamp"],
@@ -71,6 +80,7 @@ async def write_event(event: dict[str, Any]) -> None:
                 event["event_type"],
                 json.dumps(event["payload"]),
                 event.get("task_context_id"),
+                event.get("project_id"),
             ),
         )
         await db.commit()
@@ -86,8 +96,8 @@ async def write_events_batch(events: list[dict[str, Any]]) -> None:
     try:
         await db.executemany(
             """INSERT OR IGNORE INTO events
-               (id, timestamp, source, category, event_type, payload, task_context_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+               (id, timestamp, source, category, event_type, payload, task_context_id, project_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             [
                 (
                     e["id"],
@@ -97,6 +107,7 @@ async def write_events_batch(events: list[dict[str, Any]]) -> None:
                     e["event_type"],
                     json.dumps(e["payload"]),
                     e.get("task_context_id"),
+                    e.get("project_id"),
                 )
                 for e in events
             ],
@@ -112,6 +123,7 @@ async def query_events(
     source: str | None = None,
     category: str | None = None,
     event_type: str | None = None,
+    project_id: str | None = None,
     limit: int = 1000,
 ) -> list[dict[str, Any]]:
     """Query events with optional filters. Returns newest-first."""
@@ -133,6 +145,9 @@ async def query_events(
     if event_type:
         conditions.append("event_type = ?")
         params.append(event_type)
+    if project_id:
+        conditions.append("project_id = ?")
+        params.append(project_id)
 
     where_clause = (" WHERE " + " AND ".join(conditions)) if conditions else ""
     query = f"SELECT * FROM events{where_clause} ORDER BY timestamp DESC LIMIT ?"
@@ -144,6 +159,7 @@ async def query_events(
         rows = await cursor.fetchall()
         results = []
         for row in rows:
+            keys = row.keys()
             results.append({
                 "id": row["id"],
                 "timestamp": row["timestamp"],
@@ -152,6 +168,7 @@ async def query_events(
                 "event_type": row["event_type"],
                 "payload": json.loads(row["payload"]),
                 "task_context_id": row["task_context_id"],
+                "project_id": row["project_id"] if "project_id" in keys else None,
             })
         return results
     finally:

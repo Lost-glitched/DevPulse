@@ -49,5 +49,9 @@ build/
 dist/
 tmp/
 temp/
+
 # Local planning notes
 backend-implementation-plan.md
+
+# DevPulse shadow repository
+.devpulse/

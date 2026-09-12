@@ -61,6 +61,22 @@ def _event_to_marker(event: dict, range_start: datetime, range_minutes: float) -
             label = f"File saved: {payload.get('file_name', '')}"
             full_title = f"File save: {payload.get('file_path', '')}"
             details = f"{payload.get('size_bytes', 0)} bytes, {payload.get('kind', 'modified')}"
+        elif event_type == "execution_result":
+            cmd = payload.get("command", "")
+            passed = payload.get("passed", False)
+            exit_code = payload.get("exit_code", 0)
+            icon = "✓" if passed else "✗"
+            label = f"{icon} {cmd[:30]} ({'ok' if passed else f'exit {exit_code}'})"
+            full_title = f"Execution: {cmd}"
+            details = f"Exit code {exit_code} in {payload.get('duration_ms', 0)}ms"
+            track_info = {"color": "#4ade80" if passed else "#f43f5e", "track": "terminal"}
+        elif event_type == "shadow_commit":
+            trigger = payload.get("trigger", "snapshot")
+            hash_short = payload.get("shadow_commit_hash", "")[:8]
+            label = f"Shadow snapshot: {trigger} ({hash_short})"
+            full_title = f"Shadow commit {hash_short}"
+            details = f"Triggered by {trigger}"
+            track_info = {"color": "#38bdf8", "track": "ide"}
         else:
             label = f"{event_type}: {payload.get('name', '')}"
             full_title = event_type
@@ -71,6 +87,9 @@ def _event_to_marker(event: dict, range_start: datetime, range_minutes: float) -
         if event_type == "resource_sample":
             cpu = payload.get("cpu_percent", 0)
             if cpu > 80:
+                is_spike = True
+        elif event_type == "execution_result":
+            if not payload.get("passed", False):
                 is_spike = True
 
         time_str = ts.strftime("%H:%M:%S") if ts else ""
@@ -87,6 +106,10 @@ def _event_to_marker(event: dict, range_start: datetime, range_minutes: float) -
             "isSpike": is_spike,
             "isUnderScrubber": False,
             "color": track_info["color"],
+            "passed": payload.get("passed") if event_type == "execution_result" else None,
+            "command": payload.get("command") if event_type == "execution_result" else None,
+            "executionResultId": event["id"] if event_type == "execution_result" else None,
+            "exitCode": payload.get("exit_code") if event_type == "execution_result" else None,
         }
     except Exception:
         return None
@@ -100,7 +123,7 @@ def _format_ram(gb: float) -> str:
 
 @router.get("")
 async def get_timeline(
-    range: str = Query("4h", regex="^(1h|4h|8h|full)$"),
+    range: str = Query("4h", pattern="^(1h|4h|8h|full)$"),
 ):
     """
     Return merged timeline events across all sources.

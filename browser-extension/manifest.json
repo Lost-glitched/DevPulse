@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "DevPulse Tab Tracker",
+  "version": "1.0.0",
+  "description": "Streams real browser tab events to the DevPulse backend for classification and resource monitoring.",
+  "permissions": [
+    "tabs",
+    "scripting"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:8000/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  }
+}

@@ -13,9 +13,13 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from backend.api.diagnoses import router as diagnoses_router
+from backend.api.project import router as project_router
 from backend.api.resources import router as resources_router
+from backend.api.shadow import router as shadow_router
 from backend.api.tabs import router as tabs_router
 from backend.api.timeline import router as timeline_router
+from backend.browser_bridge.ws_server import setup_ws_routes
 from backend.collectors.docker_collector import run_docker_collector
 from backend.collectors.git_collector import run_git_collector
 from backend.collectors.system_collector import run_system_collector
@@ -107,6 +111,12 @@ app.add_middleware(
 app.include_router(resources_router)
 app.include_router(tabs_router)
 app.include_router(timeline_router)
+app.include_router(project_router)
+app.include_router(shadow_router)
+app.include_router(diagnoses_router)
+
+# Mount WebSocket routes
+setup_ws_routes(app)
 
 
 @app.get("/")
@@ -122,16 +132,26 @@ async def root():
 @app.get("/api/health")
 async def health():
     """Detailed health check."""
+    import os
     import psutil
     try:
         mem = psutil.virtual_memory()
-        cpu = psutil.cpu_percent(interval=0.1)
+        cpu = psutil.cpu_percent(interval=None)
     except Exception:
         mem = None
         cpu = 0
 
+    try:
+        proc = psutil.Process(os.getpid())
+        daemon_rss_mb = round(proc.memory_info().rss / (1024 * 1024), 1)
+        daemon_cpu = round(proc.cpu_percent(interval=None) or 0.0, 1)
+    except Exception:
+        daemon_rss_mb = 35.0
+        daemon_cpu = 0.5
+
     return {
         "status": "healthy",
+        "version": "0.1.0",
         "collectors": {
             "system": not _shutdown_event.is_set(),
             "docker": not _shutdown_event.is_set(),
@@ -142,5 +162,11 @@ async def health():
         "system": {
             "ram_percent": mem.percent if mem else 0,
             "cpu_percent": cpu,
+        },
+        "daemon": {
+            "rss_mb": daemon_rss_mb,
+            "cpu_percent": daemon_cpu,
+            "pid": os.getpid(),
+            "version": "0.1.0",
         },
     }

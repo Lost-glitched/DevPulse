@@ -8,21 +8,13 @@
 const API_BASE = '/api';
 
 // Track whether the backend is reachable
-let _backendAvailable = true;
-let _lastCheck = 0;
-const CHECK_INTERVAL_MS = 10_000;
+let _backendAvailable = false;
 
 async function apiFetch<T>(path: string, fallback: T): Promise<T> {
-  // If backend was recently unreachable, skip fetch for a bit to avoid noise
-  const now = Date.now();
-  if (!_backendAvailable && now - _lastCheck < CHECK_INTERVAL_MS) {
-    return fallback;
-  }
-
   try {
     const response = await fetch(`${API_BASE}${path}`, {
       headers: { 'Accept': 'application/json' },
-      signal: AbortSignal.timeout(5000),
+      signal: AbortSignal.timeout(8000),
     });
 
     if (!response.ok) {
@@ -30,12 +22,10 @@ async function apiFetch<T>(path: string, fallback: T): Promise<T> {
     }
 
     _backendAvailable = true;
-    _lastCheck = now;
     return await response.json();
   } catch (error) {
     _backendAvailable = false;
-    _lastCheck = now;
-    console.debug(`[DevPulse API] ${path} unavailable, using mock data`);
+    console.debug(`[DevPulse API] ${path} fetch failed, using fallback`);
     return fallback;
   }
 }
@@ -47,6 +37,10 @@ export interface ResourcesResponse {
   systemMemoryUsedGb: number;
   systemMemoryTotalGb: number;
   processCount: number;
+  cpuPercent?: number;
+  cpuCores?: number;
+  osPlatform?: string;
+  subsystemTotals?: Record<string, { ramGb: number; cpuPercent: number; count: number }>;
 }
 
 export async function fetchResources(): Promise<ResourcesResponse | null> {
@@ -62,6 +56,7 @@ export interface ResourceHistoryResponse {
     containers: number;
     browser: number;
     total: number;
+    cpu?: number;
   }>;
   categories: string[];
 }
@@ -83,6 +78,8 @@ export interface TabsResponse {
   staleTabs: any[];
   totalMemoryMb: number;
   tabCount: number;
+  extensionConnected?: boolean;
+  isFallback?: boolean;
 }
 
 export async function fetchTabs(): Promise<TabsResponse | null> {
@@ -131,10 +128,19 @@ export async function fetchTelemetryAtTime(
 
 // ─── Health Check ────────────────────────────────────────────
 
+export interface DaemonHealthInfo {
+  status: string;
+  version: string;
+  collectors: Record<string, boolean>;
+  background_tasks: number;
+  system: { ram_percent: number; cpu_percent: number };
+  daemon?: { rss_mb: number; cpu_percent: number; pid: number; version: string };
+}
+
 export async function checkBackendHealth(): Promise<boolean> {
   try {
     const response = await fetch(`${API_BASE}/health`, {
-      signal: AbortSignal.timeout(2000),
+      signal: AbortSignal.timeout(5000),
     });
     _backendAvailable = response.ok;
     return response.ok;
@@ -144,6 +150,93 @@ export async function checkBackendHealth(): Promise<boolean> {
   }
 }
 
+export async function fetchDaemonHealth(): Promise<DaemonHealthInfo | null> {
+  return apiFetch<DaemonHealthInfo | null>('/health', null);
+}
+
 export function isBackendAvailable(): boolean {
   return _backendAvailable;
+}
+
+// ─── Project APIs ────────────────────────────────────────────
+
+export interface ProjectInfoResponse {
+  project_id: string;
+  displayName: string;
+}
+
+export async function fetchProjectInfo(): Promise<ProjectInfoResponse | null> {
+  return apiFetch<ProjectInfoResponse | null>('/project/current', null);
+}
+
+// ─── Shadow Timeline APIs ────────────────────────────────────
+
+export async function fetchSnapshots(
+  range?: string,
+  limit: number = 50
+): Promise<{ snapshots: any[]; total: number } | null> {
+  const q = range ? `?range=${range}&limit=${limit}` : `?limit=${limit}`;
+  return apiFetch<{ snapshots: any[]; total: number } | null>(
+    `/timeline/snapshots${q}`,
+    null
+  );
+}
+
+export async function fetchFailureDiff(
+  executionResultId: string
+): Promise<any | null> {
+  return apiFetch<any | null>(
+    `/timeline/failure/${executionResultId}/diff`,
+    null
+  );
+}
+
+export async function revertToSnapshot(
+  snapshotId: string,
+  mode: 'preview' | 'apply' = 'preview',
+  confirm: boolean = false,
+  force: boolean = false
+): Promise<any | null> {
+  try {
+    const response = await fetch(`${API_BASE}/timeline/revert/${snapshotId}?mode=${mode}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirm, force }),
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({ detail: 'Reversion failed' }));
+      throw new Error(err.detail || 'Reversion failed');
+    }
+    return await response.json();
+  } catch (error) {
+    console.error('[DevPulse API] revertToSnapshot error:', error);
+    throw error;
+  }
+}
+
+// ─── Diagnoses & Remediation APIs ────────────────────────────
+
+export async function fetchDiagnoses(): Promise<{ diagnoses: any[]; total: number } | null> {
+  return apiFetch<{ diagnoses: any[]; total: number } | null>('/diagnoses', null);
+}
+
+export async function executeFix(
+  diagnosisId: string,
+  confirm: boolean = false
+): Promise<any | null> {
+  try {
+    const response = await fetch(`${API_BASE}/diagnoses/${diagnosisId}/fix`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirm }),
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({ detail: 'Remediation failed' }));
+      throw new Error(err.detail || 'Remediation failed');
+    }
+    return await response.json();
+  } catch (error) {
+    console.error('[DevPulse API] executeFix error:', error);
+    throw error;
+  }
 }

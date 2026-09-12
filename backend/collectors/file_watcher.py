@@ -9,17 +9,22 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any
 
-from backend.config import BASE_DIR
+from backend.config import BASE_DIR, SHADOW_SNAPSHOT_DEBOUNCE_SECONDS
 from backend.db.store import make_event, write_event
+from backend.project_context import detect_project_id
 
 logger = logging.getLogger("devpulse.collectors.file_watcher")
 
+_last_snapshot_time: float = 0.0
+_project_id: str | None = None
+
 # Directories to exclude from watching
 EXCLUDE_DIRS = {
-    "node_modules", ".git", "__pycache__", ".venv", "venv",
+    "node_modules", ".git", ".devpulse", "__pycache__", ".venv", "venv",
     "dist", "build", ".next", ".nuxt", "target", ".idea",
     ".vs", ".vscode", "vendor",
 }
@@ -46,7 +51,11 @@ def _should_watch(path: str) -> bool:
 
 
 async def _handle_file_event(filepath: str, event_kind: str) -> None:
-    """Create and write a file_saved event."""
+    """Create and write a file_saved event, then trigger debounced shadow snapshot."""
+    global _last_snapshot_time, _project_id
+    if _project_id is None:
+        _project_id = detect_project_id()
+
     try:
         p = Path(filepath)
         size_bytes = p.stat().st_size if p.exists() else 0
@@ -64,9 +73,20 @@ async def _handle_file_event(filepath: str, event_kind: str) -> None:
             category="ide",
             event_type="file_saved",
             payload=payload,
+            project_id=_project_id,
         )
         await write_event(event)
         logger.debug("Recorded file event: %s %s", event_kind, p.name)
+
+        # Debounced shadow snapshot
+        now = time.monotonic()
+        if now - _last_snapshot_time >= SHADOW_SNAPSHOT_DEBOUNCE_SECONDS:
+            _last_snapshot_time = now
+            try:
+                from backend.shadow_repo.repo import snapshot
+                asyncio.create_task(snapshot(project_root=_project_id, trigger="file_save"))
+            except Exception as exc:
+                logger.debug("Failed to trigger file_save snapshot: %s", exc)
 
     except Exception as exc:
         logger.debug("Error handling file event for %s: %s", filepath, exc)

@@ -1,22 +1,30 @@
 """
 Tab API Routes — /api/tabs/*
 
-Since we don't have a Chrome extension, this derives tab data from
-browser process detection and provides simulated tab classification.
+Uses real tab data from the Chrome extension (via WebSocket bridge)
+and the tab classifier for active/duplicate/stale classification.
+Falls back to an empty response when no extension is connected.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+import logging
 from typing import Any
 
 from fastapi import APIRouter, Path as PathParam
 from pydantic import BaseModel
 
-from backend.db.store import query_events
+from backend.browser_bridge.ws_server import (
+    is_extension_connected,
+    send_restore_command,
+    send_suspend_command,
+)
+from backend.classifiers.tab_classifier import classify_tabs
+
+logger = logging.getLogger("devpulse.api.tabs")
 
 router = APIRouter(prefix="/api/tabs", tags=["tabs"])
 
-# In-memory state for tab suspend/restore (simulated)
+# In-memory state for tracking which tabs we've asked the extension to suspend
 _suspended_tabs: set[str] = set()
 
 
@@ -24,97 +32,98 @@ class BulkSuspendRequest(BaseModel):
     tab_ids: list[str]
 
 
-def _detect_browser_tabs(events: list[dict]) -> dict[str, Any]:
-    """
-    Build tab data from browser process events.
-    Returns { activeTabs, duplicateGroups, staleTabs }.
-    """
-    # Get unique browser processes from recent events
-    browser_procs: dict[str, dict] = {}
-    for e in events:
-        p = e["payload"]
-        if p.get("subsystem") != "browser":
-            continue
-        pid_key = str(p.get("pid", ""))
-        if pid_key and pid_key not in browser_procs:
-            browser_procs[pid_key] = p
-
-    active_tabs: list[dict] = []
-    for pid_key, proc in browser_procs.items():
-        tab_id = f"tab-{pid_key}"
-        name = proc.get("name", "Browser Tab")
-        ram_mb = int(proc.get("ram_gb", 0) * 1024)
-        cpu_pct = proc.get("cpu_percent", 0)
-
-        # Determine tab category based on resource usage
-        is_snoozed = tab_id in _suspended_tabs
-        category = "active"
-
-        tab = {
-            "id": tab_id,
-            "title": f"{name} (PID {pid_key})",
-            "url": f"chrome://process/{pid_key}",
-            "displayDomain": name.lower(),
-            "category": category,
-            "pid": pid_key,
-            "ramMb": ram_mb,
-            "cpuPercent": cpu_pct,
-            "lastActive": "Just now",
-            "isSnoozed": is_snoozed,
-            "iconName": "language",
-            "iconColor": "#c084fc",
-            "whyText": f"Browser process consuming {ram_mb} MB RAM, {cpu_pct}% CPU.",
-        }
-        active_tabs.append(tab)
-
-    # Sort by RAM descending
-    active_tabs.sort(key=lambda t: -t["ramMb"])
-
-    return {
-        "activeTabs": active_tabs,
-        "duplicateGroups": [],
-        "staleTabs": [],
-        "totalMemoryMb": sum(t["ramMb"] for t in active_tabs),
-        "tabCount": len(active_tabs),
-    }
-
-
 @router.get("")
 async def get_tabs():
     """Return all tabs classified into active/duplicate/stale buckets."""
-    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat(
-        timespec="milliseconds"
-    )
-    events = await query_events(
-        start=cutoff,
-        event_type="resource_sample",
-        limit=500,
-    )
+    result = await classify_tabs()
+    result["extensionConnected"] = is_extension_connected()
 
-    return _detect_browser_tabs(events)
+    # Mark any locally-tracked suspended tabs
+    for tab in result.get("activeTabs", []):
+        if tab["id"] in _suspended_tabs:
+            tab["isSnoozed"] = True
+    for tab in result.get("staleTabs", []):
+        if tab["id"] in _suspended_tabs:
+            tab["isSnoozed"] = True
+    for group in result.get("duplicateGroups", []):
+        for tab in group.get("tabs", []):
+            if tab["id"] in _suspended_tabs:
+                tab["isSnoozed"] = True
+
+    return result
 
 
 @router.post("/{tab_id}/suspend")
 async def suspend_tab(tab_id: str = PathParam(...)):
-    """Suspend a single tab (simulated — marks it in memory)."""
+    """
+    Suspend a single tab by pushing a discard command to the Chrome extension.
+    The extension calls chrome.tabs.discard(tabId) which unloads the tab
+    from memory while keeping it in the tab strip.
+    """
     _suspended_tabs.add(tab_id)
-    return {"status": "suspended", "tab_id": tab_id}
+
+    # Extract numeric tab ID (format: "tab-{id}")
+    chrome_tab_id = _extract_chrome_tab_id(tab_id)
+    sent = False
+    if chrome_tab_id is not None:
+        sent = await send_suspend_command(chrome_tab_id)
+
+    return {
+        "status": "suspended" if sent else "suspended_locally",
+        "tab_id": tab_id,
+        "extension_notified": sent,
+    }
 
 
 @router.post("/bulk-suspend")
 async def bulk_suspend(request: BulkSuspendRequest):
     """Suspend multiple tabs at once."""
+    sent_count = 0
     for tab_id in request.tab_ids:
         _suspended_tabs.add(tab_id)
+        chrome_tab_id = _extract_chrome_tab_id(tab_id)
+        if chrome_tab_id is not None:
+            sent = await send_suspend_command(chrome_tab_id)
+            if sent:
+                sent_count += 1
+
     return {
         "status": "suspended",
         "count": len(request.tab_ids),
+        "extension_notified": sent_count,
         "tab_ids": request.tab_ids,
     }
 
 
 @router.post("/{tab_id}/restore")
 async def restore_tab(tab_id: str = PathParam(...)):
-    """Restore a suspended tab."""
+    """
+    Restore a suspended tab.
+
+    Note: chrome.tabs.discard() is not reversible via the Tabs API.
+    The best we can do is reload the tab, which causes it to re-render
+    from scratch (fetching the page again). This is functionally equivalent
+    to restoring since the tab URL is preserved by Chrome after discard.
+    """
     _suspended_tabs.discard(tab_id)
-    return {"status": "restored", "tab_id": tab_id}
+
+    chrome_tab_id = _extract_chrome_tab_id(tab_id)
+    sent = False
+    if chrome_tab_id is not None:
+        sent = await send_restore_command(chrome_tab_id)
+
+    return {
+        "status": "restored" if sent else "restored_locally",
+        "tab_id": tab_id,
+        "extension_notified": sent,
+    }
+
+
+def _extract_chrome_tab_id(tab_id: str) -> int | None:
+    """Extract the numeric Chrome tab ID from our 'tab-{id}' format."""
+    try:
+        if tab_id.startswith("tab-"):
+            return int(tab_id[4:])
+        return int(tab_id)
+    except (ValueError, TypeError):
+        return None

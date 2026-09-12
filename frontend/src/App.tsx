@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { ViewMode, ThemeStyle, ProcessNode } from './types';
-import { fetchResources, checkBackendHealth } from './services/api';
+import { ViewMode, ThemeStyle, ProcessNode, FailureDiffResponse } from './types';
+import { fetchResources, fetchTabs, checkBackendHealth } from './services/api';
 import { TopNavBar } from './components/TopNavBar';
 import { SideNav } from './components/SideNav';
 import { ResourceTreemapView } from './components/ResourceTreemapView';
@@ -14,16 +14,23 @@ export default function App() {
   const [currentView, setCurrentView] = useState<ViewMode>('treemap');
   const [themeStyle, setThemeStyle] = useState<ThemeStyle>('precision');
   const [isObserverPaused, setIsObserverPaused] = useState<boolean>(false);
-  
+
   const [processes, setProcesses] = useState<ProcessNode[]>([]);
-  const [selectedProcessId, setSelectedProcessId] = useState<string>('proc-webpack');
+  const [selectedProcessId, setSelectedProcessId] = useState<string>('');
   const [systemMemoryUsedGb, setSystemMemoryUsedGb] = useState<number>(0);
-  const [isBackendConnected, setIsBackendConnected] = useState(true);
+  const [systemMemoryTotalGb, setSystemMemoryTotalGb] = useState<number>(16.0);
+  const [cpuPercent, setCpuPercent] = useState<number>(0);
+  const [cpuCores, setCpuCores] = useState<number>(8);
+  const [osPlatform, setOsPlatform] = useState<string>('');
+  const [subsystemTotals, setSubsystemTotals] = useState<Record<string, { ramGb: number; cpuPercent: number; count: number }> | undefined>(undefined);
+  const [activeTabsCount, setActiveTabsCount] = useState<number>(0);
+  const [isBackendConnected, setIsBackendConnected] = useState<boolean>(true);
 
   // Modals
   const [isSnapshotOpen, setIsSnapshotOpen] = useState<boolean>(false);
   const [isAutoFreezeOpen, setIsAutoFreezeOpen] = useState<boolean>(false);
   const [isBaselineOpen, setIsBaselineOpen] = useState<boolean>(false);
+  const [failureDiffData, setFailureDiffData] = useState<FailureDiffResponse | null>(null);
 
   // Keyboard navigation shortcuts
   useEffect(() => {
@@ -46,22 +53,56 @@ export default function App() {
   // Polling data
   useEffect(() => {
     let timer: number;
-    
+
     const poll = async () => {
       if (!isObserverPaused) {
         const res = await fetchResources();
         if (res) {
-          setProcesses(res.processes);
-          setSystemMemoryUsedGb(res.systemMemoryUsedGb);
+          setIsBackendConnected(true);
+          if (res.processes) {
+            setProcesses(res.processes);
+            setSelectedProcessId((current) => {
+              if (current && res.processes.some((p: ProcessNode) => p.id === current)) {
+                return current;
+              }
+              const culprit = res.processes.find((p: ProcessNode) => p.isCause);
+              return culprit?.id || res.processes[0]?.id || '';
+            });
+          }
+          if (typeof res.systemMemoryUsedGb === 'number') {
+            setSystemMemoryUsedGb(res.systemMemoryUsedGb);
+          }
+          if (typeof res.systemMemoryTotalGb === 'number') {
+            setSystemMemoryTotalGb(res.systemMemoryTotalGb);
+          }
+          if (typeof res.cpuPercent === 'number') {
+            setCpuPercent(res.cpuPercent);
+          }
+          if (typeof res.cpuCores === 'number') {
+            setCpuCores(res.cpuCores);
+          }
+          if (res.osPlatform) {
+            setOsPlatform(res.osPlatform);
+          }
+          if (res.subsystemTotals) {
+            setSubsystemTotals(res.subsystemTotals);
+          }
+        } else {
+          setIsBackendConnected(false);
+        }
+
+        const tabRes = await fetchTabs();
+        if (tabRes) {
+          setActiveTabsCount(tabRes.tabCount ?? 0);
         }
       }
-      timer = window.setTimeout(poll, 2000);
+      timer = window.setTimeout(poll, 2500);
     };
-    
-    // Initial fetch
-    checkBackendHealth().then(isHealthy => setIsBackendConnected(isHealthy));
+
+    // Initial health check
+    checkBackendHealth().then((isHealthy) => setIsBackendConnected(isHealthy));
     poll();
-    
+
     return () => clearTimeout(timer);
   }, [isObserverPaused]);
 
@@ -101,19 +142,18 @@ export default function App() {
         return p;
       })
     );
-    // Lower system memory
-    setSystemMemoryUsedGb((mem) => Math.max(4.0, Number((mem - 0.72).toFixed(2))));
+    setSystemMemoryUsedGb((mem) => Math.max(1.0, Number((mem - 0.72).toFixed(2))));
   };
 
   const handleKillProcess = (id: string) => {
     const proc = processes.find((p) => p.id === id);
     if (!proc) return;
     setProcesses((prev) => prev.filter((p) => p.id !== id));
-    setSystemMemoryUsedGb((mem) => Math.max(3.5, Number((mem - proc.ramGb).toFixed(2))));
+    setSystemMemoryUsedGb((mem) => Math.max(1.0, Number((mem - proc.ramGb).toFixed(2))));
   };
 
   const handleReclaimMemory = (amountGb: number) => {
-    setSystemMemoryUsedGb((mem) => Math.max(3.5, Number((mem - amountGb).toFixed(2))));
+    setSystemMemoryUsedGb((mem) => Math.max(1.0, Number((mem - amountGb).toFixed(2))));
   };
 
   const handleNavigateToTreemap = (processId?: string) => {
@@ -136,7 +176,8 @@ export default function App() {
         currentView={currentView}
         onViewChange={setCurrentView}
         themeStyle={themeStyle}
-        activeTabsCount={48}
+        activeTabsCount={activeTabsCount}
+        processes={processes}
       />
 
       {/* Main App Workspace */}
@@ -150,6 +191,8 @@ export default function App() {
           onToggleObserver={() => setIsObserverPaused(!isObserverPaused)}
           onOpenSnapshotDump={() => setIsSnapshotOpen(true)}
           systemMemoryUsedGb={systemMemoryUsedGb}
+          systemMemoryTotalGb={systemMemoryTotalGb}
+          isBackendConnected={isBackendConnected}
         />
 
         {/* Dynamic View Display */}
@@ -178,7 +221,11 @@ export default function App() {
             <SessionTimelineView
               themeStyle={themeStyle}
               onNavigateToTreemap={handleNavigateToTreemap}
-              onOpenBaselineCompare={() => setIsBaselineOpen(true)}
+              systemMemoryTotalGb={systemMemoryTotalGb}
+              onOpenBaselineCompare={(diff) => {
+                setFailureDiffData(diff || null);
+                setIsBaselineOpen(true);
+              }}
             />
           )}
         </div>
@@ -191,6 +238,9 @@ export default function App() {
         processes={processes}
         themeStyle={themeStyle}
         systemMemoryUsedGb={systemMemoryUsedGb}
+        systemMemoryTotalGb={systemMemoryTotalGb}
+        cpuCores={cpuCores}
+        osPlatform={osPlatform}
       />
 
       <AutoFreezeModal
@@ -202,10 +252,17 @@ export default function App() {
 
       <BaselineCompareModal
         isOpen={isBaselineOpen}
-        onClose={() => setIsBaselineOpen(false)}
+        onClose={() => {
+          setIsBaselineOpen(false);
+          setFailureDiffData(null);
+        }}
         themeStyle={themeStyle}
+        failureDiff={failureDiffData}
+        systemMemoryUsedGb={systemMemoryUsedGb}
+        systemMemoryTotalGb={systemMemoryTotalGb}
+        cpuPercent={cpuPercent}
+        subsystemTotals={subsystemTotals}
       />
     </div>
   );
 }
-

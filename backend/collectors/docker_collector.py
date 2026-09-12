@@ -11,8 +11,11 @@ from typing import Any
 
 from backend.config import DOCKER_POLL_INTERVAL
 from backend.db.store import make_event, write_events_batch
+from backend.project_context import detect_project_id
 
 logger = logging.getLogger("devpulse.collectors.docker")
+
+_project_id: str | None = None
 
 # In-memory dedup: container_id -> last written values
 _last_samples: dict[str, dict[str, float]] = {}
@@ -99,11 +102,16 @@ def _collect_container_stats(client) -> list[dict[str, Any]]:
                 "pid": container_id,
             }
 
+            global _project_id
+            if _project_id is None:
+                _project_id = detect_project_id()
+
             event = make_event(
                 source="system",
                 category="containers",
                 event_type="resource_sample",
                 payload=payload,
+                project_id=_project_id,
             )
             events.append(event)
 

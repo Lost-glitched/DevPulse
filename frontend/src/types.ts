@@ -114,3 +114,70 @@ export interface ScrubPointTelemetry {
     };
   };
 }
+
+export interface ExecutionMarker extends TimelineMarker {
+  passed?: boolean;
+  command?: string;
+  executionResultId?: string;
+  exitCode?: number;
+  durationMs?: number;
+}
+
+export interface DiffFile {
+  file_path: string;
+  unified_diff: string;
+  lines_added: number;
+  lines_removed: number;
+}
+
+export interface CulpritHunk {
+  file_path: string;
+  hunk: string;
+  score: number;
+  matched_tokens: string[];
+}
+
+export interface FailureDiffResponse {
+  files: DiffFile[];
+  failing_commit?: string;
+  passing_commit?: string;
+  failing_command?: string;
+  exit_code?: number;
+  stderr_tail?: string;
+  stdout_tail?: string;
+  culprits?: CulpritHunk[];
+  error?: string;
+}
+
+export interface ShadowSnapshot {
+  id: string;
+  timestamp: string;
+  shadow_commit_hash: string;
+  trigger: string;
+  real_git_head?: string | null;
+  execution?: {
+    id: string;
+    command: string;
+    passed: boolean;
+    exit_code: number;
+    timestamp: string;
+  } | null;
+}
+
+export interface DiagnosisItem {
+  id: string;
+  process_key: string;
+  cause_label: string;
+  confidence: number;
+  recommendation?: string;
+  signal_values: Record<string, any>;
+  updated_at: string;
+  fix_action?: string | null;
+  fix_label?: string | null;
+  fix_reversible?: boolean;
+}
+
+export interface ProjectInfo {
+  project_id: string;
+  displayName: string;
+}

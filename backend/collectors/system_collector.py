@@ -20,8 +20,11 @@ from backend.config import (
     SYSTEM_POLL_INTERVAL,
 )
 from backend.db.store import make_event, write_events_batch
+from backend.project_context import detect_project_id
 
 logger = logging.getLogger("devpulse.collectors.system")
+
+_project_id: str | None = None
 
 # In-memory dedup cache: pid -> last written values
 _last_samples: dict[int, dict[str, float]] = {}
@@ -98,11 +101,16 @@ async def collect_once() -> list[dict[str, Any]]:
                 "cmdline": cmdline_str[:200],  # truncate long cmdlines
             }
 
+            global _project_id
+            if _project_id is None:
+                _project_id = detect_project_id()
+
             event = make_event(
                 source="system",
                 category=category,
                 event_type="resource_sample",
                 payload=payload,
+                project_id=_project_id,
             )
             events.append(event)
 

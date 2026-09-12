@@ -7,6 +7,9 @@ interface SnapshotDumpModalProps {
   processes: ProcessNode[];
   themeStyle: ThemeStyle;
   systemMemoryUsedGb: number;
+  systemMemoryTotalGb?: number;
+  cpuCores?: number;
+  osPlatform?: string;
 }
 
 export const SnapshotDumpModal: React.FC<SnapshotDumpModalProps> = ({
@@ -15,6 +18,9 @@ export const SnapshotDumpModal: React.FC<SnapshotDumpModalProps> = ({
   processes,
   themeStyle,
   systemMemoryUsedGb,
+  systemMemoryTotalGb = 16.0,
+  cpuCores = 8,
+  osPlatform = 'Windows',
 }) => {
   const [copied, setCopied] = useState(false);
 
@@ -26,13 +32,13 @@ export const SnapshotDumpModal: React.FC<SnapshotDumpModalProps> = ({
     app: 'DevPulse Telemetry Engine',
     version: '2.14.8-telemetry',
     timestamp: new Date().toISOString(),
-    session_id: 'sess-89104-prod-core',
+    session_id: `sess-${Date.now().toString(36)}-telemetry`,
     host_metrics: {
-      total_ram_gb: 16.0,
+      total_ram_gb: systemMemoryTotalGb,
       allocated_ram_gb: parseFloat(systemMemoryUsedGb.toFixed(2)),
-      utilization_percentage: parseFloat(((systemMemoryUsedGb / 16) * 100).toFixed(1)),
-      cpu_cores_active: 8,
-      kernel_version: '6.5.0-35-generic',
+      utilization_percentage: parseFloat(((systemMemoryUsedGb / (systemMemoryTotalGb || 16.0)) * 100).toFixed(1)),
+      cpu_cores_active: cpuCores,
+      kernel_version: osPlatform,
       active_subsystems: ['ide', 'terminal', 'containers', 'browser'],
     },
     monitored_processes: processes.map((p) => ({

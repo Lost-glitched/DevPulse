@@ -1,0 +1,1 @@
+# DevPulse browser bridge package

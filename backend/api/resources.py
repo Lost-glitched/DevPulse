@@ -7,6 +7,7 @@ ResourceTreemapView expects (ProcessNode[]).
 from __future__ import annotations
 
 import math
+import platform
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -138,25 +139,50 @@ async def get_current_resources():
         system_memory_gb = total_ram
         system_memory_total_gb = 16.0
 
+    try:
+        cpu_pct = round(psutil.cpu_percent(interval=None) or 0.0, 1)
+        cpu_cores = psutil.cpu_count(logical=True) or 4
+    except Exception:
+        cpu_pct = 0.0
+        cpu_cores = 4
+
+    os_platform = f"{platform.system()} {platform.release()}"
+
+    subsystem_totals: dict[str, dict[str, float | int]] = {
+        "ide": {"ramGb": 0.0, "cpuPercent": 0.0, "count": 0},
+        "terminal": {"ramGb": 0.0, "cpuPercent": 0.0, "count": 0},
+        "containers": {"ramGb": 0.0, "cpuPercent": 0.0, "count": 0},
+        "browser": {"ramGb": 0.0, "cpuPercent": 0.0, "count": 0},
+    }
+    for p in processes:
+        sub = p.get("subsystem")
+        if sub in subsystem_totals:
+            subsystem_totals[sub]["ramGb"] = round(float(subsystem_totals[sub]["ramGb"]) + float(p["ramGb"]), 2)
+            subsystem_totals[sub]["cpuPercent"] = round(float(subsystem_totals[sub]["cpuPercent"]) + float(p["cpuPercent"]), 1)
+            subsystem_totals[sub]["count"] = int(subsystem_totals[sub]["count"]) + 1
+
     return {
         "processes": processes,
         "systemMemoryUsedGb": system_memory_gb,
         "systemMemoryTotalGb": system_memory_total_gb,
         "processCount": len(processes),
+        "cpuPercent": cpu_pct,
+        "cpuCores": cpu_cores,
+        "osPlatform": os_platform,
+        "subsystemTotals": subsystem_totals,
     }
 
 
 @router.get("/history")
 async def get_resource_history(
-    range: str = Query("1h", regex="^(1h|4h|8h)$"),
+    range: str = Query("1h", pattern="^(1h|4h|8h)$"),
 ):
     """
     Return time-bucketed resource usage series for the waveform graph.
     """
     range_hours = {"1h": 1, "4h": 4, "8h": 8}[range]
-    cutoff = (
-        datetime.now(timezone.utc) - timedelta(hours=range_hours)
-    ).isoformat(timespec="milliseconds")
+    now = datetime.now(timezone.utc)
+    cutoff = (now - timedelta(hours=range_hours)).isoformat(timespec="milliseconds")
 
     events = await query_events(
         start=cutoff,
@@ -176,7 +202,9 @@ async def get_resource_history(
 
         if ts not in buckets:
             buckets[ts] = {c: [] for c in categories}
+            buckets[ts]["_cpu"] = []
         buckets[ts].setdefault(category, []).append(e["payload"].get("ram_gb", 0))
+        buckets[ts]["_cpu"].append(e["payload"].get("cpu_percent", 0))
 
     # Build series
     series: list[dict[str, Any]] = []
@@ -187,7 +215,32 @@ async def get_resource_history(
             values = bucket.get(cat, [])
             point[cat] = round(sum(values), 2) if values else 0
         point["total"] = sum(point.get(c, 0) for c in categories)
+        cpu_vals = bucket.get("_cpu", [])
+        point["cpu"] = round(sum(cpu_vals) / len(cpu_vals), 1) if cpu_vals else 0.0
         series.append(point)
+
+    # If series is empty (e.g. freshly started), provide baseline live points
+    if not series:
+        try:
+            mem = psutil.virtual_memory()
+            used_gb = round(mem.used / (1024**3), 2)
+            cpu_val = round(psutil.cpu_percent(interval=None) or 15.0, 1)
+        except Exception:
+            used_gb = 4.0
+            cpu_val = 15.0
+
+        ts_prev = (now - timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M")
+        ts_now = now.strftime("%Y-%m-%dT%H:%M")
+        for t in [ts_prev, ts_now]:
+            series.append({
+                "time": t,
+                "ide": 0,
+                "terminal": 0,
+                "containers": 0,
+                "browser": 0,
+                "total": used_gb,
+                "cpu": cpu_val,
+            })
 
     return {
         "range": range,
